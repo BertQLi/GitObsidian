@@ -103,6 +103,16 @@ class ControlPanelModal extends Modal {
       if (color) v.style.color = color;
     };
     row("仓库", p.isRepo() ? "已初始化" : "未初始化", p.isRepo() ? "" : "var(--text-error)");
+    if (p.isRepo()) {
+      const pref = p._vaultPrefix;
+      if (pref === undefined) {
+        row("本 vault 位置", "检测中…");
+      } else if (pref) {
+        row("本 vault 位置", "仓库内 " + pref.replace(/\/$/, ""));
+      } else {
+        row("本 vault 位置", "仓库根");
+      }
+    }
     row("同步范围", scopeText);
     row("上次同步", lastText);
     if (p.settings.lastSyncResult) row("结果", p.settings.lastSyncResult);
@@ -352,6 +362,8 @@ class SimpleGitSyncPlugin extends Plugin {
     this.addCommand({ id: "sync-selected", name: "同步选中的文件夹", callback: () => this.guard(() => this.doSyncSelected()) });
 
     this.addSettingTab(new SimpleGitSyncSettingTab(this.app, this));
+    // 启动时探测仓库结构（多 vault 场景：仓库根可能在父目录）
+    this.detectRepoRoot().then(() => this.updateStatusIdle()).catch(() => {});
     this.restartTimer();
   }
 
@@ -406,12 +418,54 @@ class SimpleGitSyncPlugin extends Plugin {
     });
   }
 
+  // 仓库根可能不在 vault 根（多 vault 场景：MyObsidian/vaultA、MyObsidian/vaultB）
+  // 这里同步查一次，避免每次 git 操作都起进程
   isRepo() {
+    // 不用缓存：fs.existsSync 很轻，且仓库可能在运行中被 init
+    // 先看自己目录，再向上找 .git（多 vault 场景仓库根在父目录）
     try {
-      return fs.existsSync(path.join(this.getVaultPath(), ".git"));
-    } catch (e) {
+      let dir = this.getVaultPath();
+      for (let i = 0; i < 12; i++) {
+        if (fs.existsSync(path.join(dir, ".git"))) return true;
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    } catch (err) {
       return false;
     }
+    return false;
+  }
+
+  // 异步版本：准确判断（向上查找 .git）
+  async detectRepoRoot() {
+    try {
+      const r = await this.runGit(["rev-parse", "--show-toplevel"]);
+      this._repoRoot = r.stdout.trim().replace(/\\/g, "/");
+    } catch (e) {
+      this._repoRoot = null;
+    }
+    return this._repoRoot;
+  }
+
+  // vault 相对于仓库根的路径，如 "vaultA"；若 vault 就是仓库根则返回 ""
+  async vaultPrefix() {
+    if (this._vaultPrefix !== undefined) return this._vaultPrefix;
+    try {
+      const r = await this.runGit(["rev-parse", "--show-prefix"]);
+      this._vaultPrefix = r.stdout.trim().replace(/\\/g, "/");
+    } catch (e) {
+      this._vaultPrefix = "";
+    }
+    return this._vaultPrefix;
+  }
+
+  // 当前 vault 是否就是仓库根
+  async isVaultAtRepoRoot() {
+    const root = await this.detectRepoRoot();
+    if (!root) return false;
+    const v = this.getVaultPath().replace(/\\/g, "/").replace(/\/+$/, "");
+    return path.resolve(root) === path.resolve(v);
   }
 
   requireRepo() {
@@ -492,6 +546,17 @@ class SimpleGitSyncPlugin extends Plugin {
       .filter(function (s) { return s !== ".git" && s.indexOf(".git/") !== 0; });
   }
 
+  // 把「当前 vault」作为 pathspec 前缀：多 vault 时只影响本 vault
+  async scopedSpec(spec) {
+    const list = (spec || []).slice();
+    if (await this.isVaultAtRepoRoot()) {
+      return list; // vault 就是仓库根，无需限定
+    }
+    // vault 是子目录：所有路径都相对 vault 根，git 在 vault 目录下执行时天然限定
+    // 但为了安全（比如 spec 为空表示"整个 vault"），加 "." 显式限定
+    return list.length ? list : ["."];
+  }
+
   async hasChanges(spec) {
     const args = ["status", "--porcelain"];
     if (spec && spec.length) args.push("--");
@@ -514,13 +579,15 @@ class SimpleGitSyncPlugin extends Plugin {
       return true;
     }
     this.lastSpecFallback = false;
+    // 关键：vault 是子目录时，必须加 "." 限定，否则 git add -A 会扫到兄弟 vault
+    const scoped = await this.scopedSpec(spec);
     const addArgs = ["add", "-A"];
-    if (spec.length) addArgs.push("--");
-    await this.runGit(spec.length ? addArgs.concat(spec) : addArgs);
-    if (!(await this.hasChanges(spec))) return false;
+    if (scoped.length) addArgs.push("--");
+    await this.runGit(scoped.length ? addArgs.concat(scoped) : addArgs);
+    if (!(await this.hasChanges(scoped))) return false;
     const commitArgs = ["commit", "-m", message];
-    if (spec.length) commitArgs.push("--");
-    await this.runGit(spec.length ? commitArgs.concat(spec) : commitArgs);
+    if (scoped.length) commitArgs.push("--");
+    await this.runGit(scoped.length ? commitArgs.concat(scoped) : commitArgs);
     return true;
   }
 
@@ -586,6 +653,11 @@ class SimpleGitSyncPlugin extends Plugin {
     await this.runGit(["remote", "add", "origin", String(this.settings.remoteUrl).trim()]);
     const committed = await this.commitAll("初始提交 " + stamp());
     await this.pushWithHint();
+    // init 后仓库结构变了，清缓存重新探测
+    this._repoRoot = undefined;
+    this._vaultPrefix = undefined;
+    await this.detectRepoRoot();
+    await this.vaultPrefix();
     this.markSynced(committed ? "首次上传完成" : "首次上传完成（无新改动）", false);
   }
 
@@ -759,6 +831,9 @@ class SimpleGitSyncPlugin extends Plugin {
       new Notice("正在同步中，请稍候…");
       return;
     }
+    // 每次操作重新探测仓库结构（可能刚 init 或换了 vault）
+    this._repoRoot = undefined;
+    this._vaultPrefix = undefined;
     this.syncing = true;
     this.setStatus("同步中…");
     try {
