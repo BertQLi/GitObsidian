@@ -158,6 +158,7 @@ class ControlPanelModal extends Modal {
     // 其他
     const g3 = btnRow("维护");
     mkBtn(g3, "安装到 .obsidian", false, () => p.guard(() => p.doInstallToObsidian()), "源码 → 插件目录");
+    mkBtn(g3, "隐藏 .gitignore/.gitattributes", false, () => runAndRefresh(() => p.doHideRepoFiles()), "从仓库移除，改用本地排除规则");
     if (p.isRepo()) {
       mkBtn(g3, "取消未完成的合并", false, () => p.guard(() => p.doAbortMerge()));
     }
@@ -359,6 +360,7 @@ class SimpleGitSyncPlugin extends Plugin {
     this.addCommand({ id: "abort-merge", name: "取消未完成的合并", callback: () => this.guard(() => this.doAbortMerge()) });
     this.addCommand({ id: "install-to-obsidian", name: "安装到 .obsidian（源码目录 → 插件目录）", callback: () => this.guard(() => this.doInstallToObsidian()) });
     this.addCommand({ id: "choose-folders", name: "选择要同步的文件夹", callback: () => this.doChooseFolders() });
+    this.addCommand({ id: "hide-repo-files", name: "隐藏 .gitignore / .gitattributes（从仓库移除）", callback: () => this.guard(() => this.doHideRepoFiles()) });
     this.addCommand({ id: "sync-selected", name: "同步选中的文件夹", callback: () => this.guard(() => this.doSyncSelected()) });
 
     this.addSettingTab(new SimpleGitSyncSettingTab(this.app, this));
@@ -565,6 +567,13 @@ class SimpleGitSyncPlugin extends Plugin {
   }
 
   async commitAll(message) {
+    // 先把 .gitignore/.gitattributes 从索引移除（本地文件保留），
+    // 这样它们不会出现在远程仓库里。
+    // 注意：移除操作在仓库根，不在 selectedFolders 范围内，
+    // 所以必须单独检测并提交，否则会被 hasChanges() 判定为"无改动"而漏掉
+    await this.untrackRepoFiles();
+    const hasUntracked = await this.hasStagedRemoval();
+
     // 优先用「选中的文件夹」，没选则回退到 syncPaths，再没有就整仓
     let spec = this.selectedPathSpec();
     if (spec.length === 0) spec = this.pathSpec();
@@ -584,19 +593,87 @@ class SimpleGitSyncPlugin extends Plugin {
     const addArgs = ["add", "-A"];
     if (scoped.length) addArgs.push("--");
     await this.runGit(scoped.length ? addArgs.concat(scoped) : addArgs);
-    if (!(await this.hasChanges(scoped))) return false;
+
+    // 有 .gitxxx 的移除时，即使选中范围没改动也要提交
+    const changed = (await this.hasChanges(scoped)) || hasUntracked;
+    if (!changed) return false;
+
+    // 有移除时提交整个索引（不带 pathspec），否则只提交选中范围
     const commitArgs = ["commit", "-m", message];
-    if (scoped.length) commitArgs.push("--");
-    await this.runGit(scoped.length ? commitArgs.concat(scoped) : commitArgs);
+    if (scoped.length && !hasUntracked) commitArgs.push("--");
+    await this.runGit(scoped.length && !hasUntracked ? commitArgs.concat(scoped) : commitArgs);
     return true;
   }
 
-  ensureRepoFiles() {
+  // 必须排除的文件（硬编码，不依赖 .gitignore 是否存在）
+  // 这些规则同时写进 .git/info/exclude —— 它不进仓库，所以远程看不到 .gitignore
+  protectedPatterns() {
+    return [
+      "**/.obsidian/workspace.json",
+      "**/.obsidian/workspace-mobile.json",
+      "**/.obsidian/cache",
+      "**/.obsidian/plugins/*/data.json",
+      "**/.trash/",
+      ".DS_Store",
+      "Thumbs.db",
+      "desktop.ini",
+      "*.tmp",
+      // 仓库根这两个文件也不上传（本插件自己维护）
+      // 注意：不能写 "/.gitignore"，exclude 里的前导斜杠不匹配，要用不带斜杠的写法
+      ".gitignore",
+      ".gitattributes"
+    ];
+  }
+
+  // 把保护规则写进 .git/info/exclude（本地生效，不随仓库同步）
+  async ensureRepoFiles() {
+    // 写 .gitignore / .gitattributes 到文件系统（本地仍需要，git 读它们）
     const root = this.getVaultPath();
     const gi = path.join(root, ".gitignore");
     const ga = path.join(root, ".gitattributes");
     if (!fs.existsSync(gi)) fs.writeFileSync(gi, GITIGNORE, "utf8");
     if (!fs.existsSync(ga)) fs.writeFileSync(ga, GITATTRIBUTES, "utf8");
+
+    // 关键：把它们本身加入本地 exclude，这样不会被提交
+    try {
+      // 注意：--git-path 返回相对当前目录的路径，在 vault 子目录里会拼错
+      // 用 --absolute-git-dir 拿绝对路径
+      const r = await this.runGit(["rev-parse", "--absolute-git-dir"]);
+      const gitDir = r.stdout.trim().replace(/\\/g, "/");
+      const excludePath = path.join(gitDir, "info", "exclude");
+      const marker = "# simple-git-sync";
+      const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
+      if (existing.indexOf(marker) === -1) {
+        const block = "\n" + marker + "\n" + this.protectedPatterns().join("\n") + "\n";
+        fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+        fs.appendFileSync(excludePath, block, "utf8");
+      }
+    } catch (e) {
+      console.error("[simple-git-sync] 写 info/exclude 失败", e);
+    }
+  }
+
+  // 检查索引里是否有已删除的条目（用于捕获 .gitxxx 的移除）
+  async hasStagedRemoval() {
+    try {
+      const r = await this.runGit(["diff", "--cached", "--name-only", "--diff-filter=D"]);
+      return r.stdout.trim().length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // 如果 .gitignore/.gitattributes 之前被跟踪过，从索引移除（本地文件保留）
+  async untrackRepoFiles() {
+    // 注意：在 vault 子目录执行时，":.gitignore" 会被解析成 vaultA/.gitignore
+    // 必须用 ":(top)" 魔法前缀指向仓库根
+    for (const f of [".gitignore", ".gitattributes"]) {
+      try {
+        await this.runGit(["rm", "--cached", "--ignore-unmatch", "--", ":(top)" + f]);
+      } catch (e) {
+        // 没跟踪过会失败，忽略
+      }
+    }
   }
 
   async ensureIdentity() {
@@ -647,7 +724,7 @@ class SimpleGitSyncPlugin extends Plugin {
       await this.runGit(["init"]);
       await this.runGit(["symbolic-ref", "HEAD", "refs/heads/" + (this.settings.branch || "main")]);
     }
-    this.ensureRepoFiles();
+    await this.ensureRepoFiles();
     await this.ensureIdentity();
     await this.runGit(["remote", "remove", "origin"]).catch(function () {});
     await this.runGit(["remote", "add", "origin", String(this.settings.remoteUrl).trim()]);
@@ -817,6 +894,16 @@ class SimpleGitSyncPlugin extends Plugin {
       (committed ? "已同步 " : "已同步（无改动）") + spec.join("、"),
       false
     );
+  }
+
+  // 把 .gitignore/.gitattributes 从仓库移除，同时保证保护规则仍然生效
+  async doHideRepoFiles() {
+    this.requireRepo();
+    await this.ensureRepoFiles();   // 确保本地文件存在 + info/exclude 已写入
+    await this.untrackRepoFiles();  // 从索引移除
+    const committed = await this.commitAll("隐藏 .gitignore / .gitattributes（改用 .git/info/exclude）");
+    await this.pushWithHint();
+    this.markSynced(committed ? "已隐藏 .gitxxx 并推送" : "已隐藏 .gitxxx", false);
   }
 
   async doAbortMerge() {
