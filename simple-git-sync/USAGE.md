@@ -1,15 +1,58 @@
 # Simple Git Sync 使用说明
 
+## 管理范围：整个 vault
+
+插件管理的是**整个 Obsidian vault**，不只是笔记。
+
+```
+vault/
+├── .obsidian/          ← 同步（除 workspace.json 和 data.json）
+│   ├── app.json            编辑器设置
+│   ├── appearance.json     主题
+│   ├── core-plugins.json   核心插件开关
+│   ├── community-plugins.json  第三方插件开关
+│   ├── graph.json          图谱设置
+│   └── plugins/            已安装的插件
+├── .git/               ← 不同步（git 自己用）
+├── .gitignore          ← 同步
+├── .gitattributes      ← 同步
+└── 你的笔记/            ← 同步
+```
+
+**为什么管 vault 而不是只管笔记**：Mac clone 下来后，插件装好了、主题对了、快捷键同步了，只需要填一次 PAT 就能用。只管笔记的话，每次换设备都要手动装插件。
+
+## 不会影响日常用笔记
+
+Obsidian 默认**不显示以 `.` 开头的文件/文件夹**，所以：
+
+| 硬盘上有的 | Obsidian 里看得见吗 |
+|---|---|
+| `.git/` | ❌ 隐藏 |
+| `.obsidian/` | ❌ 隐藏 |
+| `.gitignore` | ❌ 隐藏 |
+| `.gitattributes` | ❌ 隐藏 |
+| `SIGMOD2027/` | ✅ 可见 |
+
+**你打开 Obsidian 只会看到自己的笔记文件夹，和用普通 Obsidian 没区别。**
+
+## 不同步的两个文件
+
+| 文件 | 不同步原因 |
+| --- | --- |
+| `.obsidian/workspace.json` | 每台设备的窗口布局不同（面板位置、大小），同步必冲突 |
+| `.obsidian/plugins/*/data.json` | **存着 GitHub 访问令牌**，绝对不能提交 |
+
+这两个已在 `.gitignore` 里排除。
+
 ## 最常用：点右下角状态栏
 
-**点状态栏的 `Git · 就绪`，直接弹出操作面板**，不用进设置、不用记命令。
+**点状态栏的 `Git · 就绪`，直接弹出操作面板**。
 
 ```
 ┌─ Git 同步 ──────────────────────┐
 │ 仓库：已初始化                   │
 │ 同步范围：SIGMOD2027             │
-│ 上次同步：2026/11/3 20:45:12     │
-│ 结果：已同步 SIGMOD2027          │
+│ 上次同步：2026/11/3 21:05:12     │
 │                                  │
 │ 同步                             │
 │ [同步选中] [全部同步] [上传] [下载]│
@@ -18,37 +61,15 @@
 │ [选择要同步的文件夹]             │
 │                                  │
 │ 维护                             │
-│ [安装到 .obsidian] [取消未完成的合并] [刷新] │
-│                                  │
-│ ▸ 详细信息                       │
+│ [安装到 .obsidian] [取消合并] [刷新] │
 └──────────────────────────────────┘
 ```
-
-点按钮执行完，面板会自动刷新显示最新状态。
-
-## 按钮说明
-
-| 按钮 | 作用 |
-| --- | --- |
-| **同步选中** | 只同步勾选的文件夹（日常用这个） |
-| **全部同步** | 同步整个仓库 |
-| **上传** | 只提交 + 推送，不拉取 |
-| **下载** | 只拉取远程，不推送 |
-| **选择要同步的文件夹** | 弹出勾选框，选哪些文件夹参与同步 |
-| **安装到 .obsidian** | 源码 → 插件目录，可一键重载 |
-| **取消未完成的合并** | 冲突时回滚 |
-| **刷新** | 重新读取状态 |
 
 ## 核心概念：一个仓库，多个文件夹，选着同步
 
 ```
 GitHub: BertQLi/MyObsidian
-├── SIGMOD2027/
-├── 笔记A/
-└── 笔记B/
-
-本地 vault: D:\Personal\博士\并行训练\note\并行训练\
-├── .obsidian/        ← 只在本地，不同步
+├── .obsidian/
 ├── SIGMOD2027/
 ├── 笔记A/
 └── 笔记B/
@@ -58,28 +79,10 @@ GitHub: BertQLi/MyObsidian
 
 实测：三个文件夹都改了，只勾「笔记A」→ 只有笔记A 被提交推送，另外两个仍在工作区未提交。
 
-状态栏显示 `Git · 就绪 · SIGMOD2027`，一眼看出当前同步范围。
-
-## 命令面板（备用）
-
-点状态栏不方便时，`Ctrl+P` 搜 "Git" 也有全部命令：
-
-| 命令 | 作用 |
-| --- | --- |
-| 打开操作面板 | 等同于点状态栏 |
-| 选择要同步的文件夹 | |
-| 同步选中的文件夹 | |
-| 同步（提交 + 拉取 + 推送） | |
-| 上传 / 下载 | |
-| 安装到 .obsidian | |
-| 查看仓库状态 | |
-| 取消未完成的合并 | |
-| 初始化仓库并首次上传 | |
-
 ## 三种同步范围的优先级
 
 1. **选中的文件夹**（`selectedFolders`）—— 最优先
-2. **同步范围**（`syncPaths`）—— 多行路径
+2. **同步范围**（`syncPaths` 多行路径）
 3. **整仓** —— 两者都为空时
 
 ## 新增笔记文件夹
@@ -88,61 +91,49 @@ GitHub: BertQLi/MyObsidian
 2. 点状态栏 → 「选择要同步的文件夹」
 3. 勾上 `笔记C`，保存
 
-之后同步就会包含它。
+## 新设备接入（Mac）
 
-## 关于 clone
+```bash
+git clone https://github.com/BertQLi/MyObsidian.git ~/MyObsidian
+git config --global core.precomposeunicode true   # 中文文件名 NFC/NFD
+```
 
-**clone 是仓库级的，不能只 clone 一个文件夹。**
-
-但仓库小的时候（几 MB），clone 一次不费事。换设备时 `git clone` 拿到所有文件夹，之后用文件夹选择器控制推哪些。
-
-## .obsidian 配置
-
-**完全不在版本控制里**（`.gitignore` 里有 `.obsidian/`）。
-
-好处：仓库是纯笔记，干净。
-代价：换设备要手动装插件、填令牌。
-
-⚠️ `.obsidian/` **没有版本保护**。不要用 `git clean -fdx`、`git reset --hard`（实测会把 `.obsidian` 清空）。
-
-备份：`D:\Personal\博士\并行训练\note\_backup\`
+1. Obsidian 打开这个文件夹作为 vault
+2. 插件**已经在了**（`.obsidian/plugins/simple-git-sync/`）
+3. 设置 → 第三方插件 → 关闭限制模式 → 启用 **Simple Git Sync**
+4. 填配置：仓库地址、用户名、PAT（`data.json` 含令牌所以没同步，要填一次）
+5. 点状态栏 → 「选择要同步的文件夹」
 
 ## 改插件后怎么生效
 
 | 位置 | 作用 |
 | --- | --- |
-| `D:\...\note\obsidian-simple-git-sync\simple-git-sync\` | 源码（独立仓库） |
-| `vault\.obsidian\plugins\simple-git-sync\` | Obsidian 实际加载的副本 |
+| `D:\...\note\obsidian-simple-git-sync\simple-git-sync\` | 源码（独立仓库，GitObsidian） |
+| `vault\.obsidian\plugins\simple-git-sync\` | Obsidian 实际加载的副本（同步到笔记仓库） |
 
 改完源码 → 点状态栏 → 「安装到 .obsidian」→ 弹窗点「立即重载插件」。
 
+插件设置里的「插件源码目录」填绝对路径：
+```
+D:/Personal/博士/并行训练/note/obsidian-simple-git-sync/simple-git-sync
+```
+
 ## 安全
 
-- PAT 存在 `.obsidian/plugins/simple-git-sync/data.json`
-- `.obsidian/` 整个被 gitignore，令牌不会上传
+- PAT 存在 `.obsidian/plugins/simple-git-sync/data.json`，已在 `.gitignore`
 - 令牌只在执行 git 时通过 URL 临时传入，不写进 `.git/config`
 - 所有 git 调用加 `credential.helper=`，避免凭据管理器弹窗卡死自动同步
 
 ## 当前状态（2026-11-03）
 
 ```
-仓库:       https://github.com/BertQLi/MyObsidian.git
-远程内容:   .gitattributes + .gitignore + SIGMOD2027/（纯笔记）
+笔记仓库:   https://github.com/BertQLi/MyObsidian.git
+仓库内容:   .obsidian 配置 + 插件 + SIGMOD2027/（11 个文件）
 选中文件夹: SIGMOD2027
 自动同步:   关（设置里可开，建议 10 分钟）
+插件源码:   https://github.com/BertQLi/GitObsidian.git
+备份:       D:\Personal\博士\并行训练\note\_backup\
 ```
-
-## Mac 端接入
-
-```bash
-git clone https://github.com/BertQLi/MyObsidian.git ~/MyObsidian
-git config --global core.precomposeunicode true
-```
-
-1. Obsidian 打开这个文件夹作为 vault
-2. 手动装插件：拷 `main.js` + `manifest.json` 到 `.obsidian/plugins/simple-git-sync/`
-3. 插件设置填仓库地址、用户名、PAT
-4. 点状态栏 → 「选择要同步的文件夹」
 
 ## 已知限制
 
