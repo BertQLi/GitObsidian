@@ -1,0 +1,9 @@
+{
+  "id": "simple-git-sync",
+  "name": "Simple Git Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "一键把笔记目录同步到 GitHub 私有仓库：初始化上传 / 下载 / 自动同步。最小实现，无第三方依赖。",
+  "author": "libaoqiang",
+  "isDesktopOnly": true
+}
