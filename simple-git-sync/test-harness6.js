@@ -161,6 +161,15 @@ async function main() {
     t("点击上传后文件推到远程", remoteTree.some((f) => f.includes("SIGMOD2027/new.md")), JSON.stringify(remoteTree));
   }
 
+  // 「全部同步」必须覆盖选中文件夹设置，提交本 vault 里的其他文件夹。
+  fs.writeFileSync(path.join(vault, "笔记A", "note.md"), "# 全部同步测试\n");
+  MODALS.length = 0;
+  p.showStatus();
+  const allBtn = findButton(MODALS[0].contentEl, "全部同步");
+  if (allBtn) await allBtn._on.click();
+  const remoteNote = git(["--git-dir=" + remote, "show", "main:笔记A/note.md"], tmp);
+  t("全部同步会提交未选中的文件夹", remoteNote.includes("全部同步测试"), remoteNote);
+
   // --- 面板刷新后状态更新 ---
   MODALS.length = 0;
   p.showStatus();
@@ -178,6 +187,7 @@ async function main() {
   const btns2 = collectButtons(MODALS[0].contentEl);
   t("未初始化时隐藏取消合并", !btns2.includes("取消未完成的合并"), JSON.stringify(btns2));
   t("未初始化时仍显示同步按钮", btns2.includes("同步选中"), JSON.stringify(btns2));
+  t("未初始化时可从面板首次上传", btns2.includes("初始化并首次上传"), JSON.stringify(btns2));
 
   console.log(results.join("\n"));
   const failed = results.filter((r) => r.startsWith("FAIL")).length;

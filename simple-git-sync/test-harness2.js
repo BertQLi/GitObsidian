@@ -6,7 +6,7 @@ const { execFileSync } = require("child_process");
 const NOTICES = [];
 class Plugin {
   constructor(app, manifest) { this.app = app; this.manifest = manifest; }
-  addStatusBarItem() { return { setText: () => {}, addClass: () => {} }; }
+  addStatusBarItem() { return { setText: () => {}, setAttr: () => {}, addClass: () => {} }; }
   registerDomEvent() {} registerInterval() {} addCommand() {} addSettingTab() {}
   async loadData() { return this._data || {}; }
   async saveData(d) { this._data = d; }
@@ -89,6 +89,14 @@ async function main() {
     t("取消合并后工作区干净", status === "", status.slice(0, 120));
     const content = fs.readFileSync(path.join(vault, "a.md"), "utf8");
     t("取消合并后保留本地内容", content.includes("WIN VERSION"), content);
+    let noMerge = false;
+    try { await p.doAbortMerge(); } catch (e) { noMerge = /没有未完成的合并/.test(e.message); }
+    t("没有合并时不误报取消成功", noMerge);
+
+    p.settings.remoteUrl = path.join(root, "missing.git");
+    let badRemote = false;
+    try { await p.doDownload(); } catch (e) { badRemote = /not appear to be a git repository|不是一个 git 仓库/i.test(e.message); }
+    t("远程地址无效时下载报错", badRemote);
   }
 
   // ===== 用例 C：带令牌的 URL 拼接 =====
@@ -107,6 +115,11 @@ async function main() {
     p.settings.token = "ghp_secret";
     const u = p.authedUrl();
     t("有令牌时注入凭据", u.includes("ghp_secret") && u.startsWith("https://me:"), u);
+
+    let safeError = false;
+    try { await p.runGit(["unknown-subcommand", u]); }
+    catch (e) { safeError = !JSON.stringify({ message: e.message, stdout: e.stdout, stderr: e.stderr }).includes("ghp_secret"); }
+    t("Git 失败信息不暴露令牌", safeError);
 
     p.settings.remoteUrl = "git@github.com:me/repo.git";
     p.settings.username = "me"; p.settings.token = "ghp_x";

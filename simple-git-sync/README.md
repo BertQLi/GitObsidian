@@ -1,6 +1,8 @@
 # Simple Git Sync（Obsidian 插件）
 
-极简版 Obsidian ⇄ GitHub 同步插件。零第三方依赖，纯 JS，无需构建，单文件 735 行。
+极简版 Obsidian ⇄ GitHub 同步插件。零第三方依赖，纯 JS，无需构建。
+
+每个 vault 对应一个 Git 仓库，仓库根目录就是 vault 根目录。克隆到新设备后，插件会自动读取 `origin` 地址。
 
 ## 功能
 
@@ -14,14 +16,14 @@
 
 ## 限定同步范围（双轨同步）
 
-设置里的**同步范围**填多行目录，只同步这些路径：
+设置里的**同步范围**填多行目录，只提交这些路径的本地改动：
 
 ```
 notes
 .obsidian
 ```
 
-这样笔记自动同步时**完全不碰** `plugins/`，插件源码手动推。留空则同步整个仓库。
+这样笔记自动同步时不会提交 `plugins/` 的本地改动，插件源码可以手动推。拉取远程仍会更新整个仓库。留空则提交当前 vault 的全部文件。
 
 实现方式：git pathspec 限定（`git add -A -- notes .obsidian`）。
 
@@ -49,7 +51,7 @@ notes
 ## 安全
 
 - 令牌保存在 `.obsidian/plugins/simple-git-sync/data.json`
-- 该路径已自动写入 `.gitignore`，不会被推送到仓库
+- 同步前会写入本地 `.git/info/exclude` 排除规则；若配置文件已被 Git 跟踪，同步会停止并提示处理
 - 推送/拉取时令牌通过 URL 参数临时传入，不写入 `.git/config`
 - 所有 git 调用都加 `-c credential.helper=`，避免凭据管理器弹窗卡死自动同步
 
@@ -66,15 +68,23 @@ notes
 | 套件 | 断言数 | 覆盖 |
 | --- | --- | --- |
 | test-harness.js | 14 | init / 上传 / 下载 / 同步 / 无改动 / 非仓库 |
-| test-harness2.js | 9 | 远程非空 / 冲突 / 取消合并 / 令牌 URL / SSH 地址 |
-| test-harness3.js | 12 | 限定目录同步、pathSpec 边界、目录不存在退化 |
-| test-harness4.js | 17 | 安装命令、文件筛选、manifest 校验、幂等 |
+| test-harness2.js | 12 | 远程非空 / 冲突 / 取消合并 / 令牌脱敏 |
+| test-harness3.js | 15 | 限定目录同步、pathSpec 边界、范围不存在时停止提交 |
+| test-harness4.js | 20 | 安装命令、文件筛选、manifest 校验、幂等 |
+| test-harness5.js | 19 | 文件夹选择器、部分提交、过滤不存在目录 |
+| test-harness6.js | 21 | 操作面板、首次上传、全部同步 |
+| test-harness7.js | 12 | 一 vault 一仓库、克隆后同步与 origin 识别 |
+| test-harness8.js | 23 | 本地排除规则与令牌文件保护 |
 
-**52 个断言全绿。**
+**136 个断言。**
 
 ```powershell
 node test-harness.js  <临时目录>
 node test-harness2.js <临时目录>
 node test-harness3.js <临时目录>
 node test-harness4.js <临时目录>
+node test-harness5.js <临时目录>
+node test-harness6.js <临时目录>
+node test-harness7.js <临时目录>
+node test-harness8.js <临时目录>
 ```

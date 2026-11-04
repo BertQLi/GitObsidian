@@ -15,7 +15,7 @@ function mkEl() {
 }
 class Plugin {
   constructor(app, m) { this.app = app; this.manifest = m; }
-  addStatusBarItem() { return { setText: () => {}, addClass: () => {} }; }
+  addStatusBarItem() { return { setText: () => {}, setAttr: () => {}, addClass: () => {} }; }
   registerDomEvent() {} registerInterval() {} addCommand() {} addSettingTab() {}
   async loadData() { return {}; } async saveData() {}
 }
@@ -110,6 +110,12 @@ async function main() {
   // --- 选中不存在的文件夹时过滤掉 ---
   p.settings.selectedFolders = ["笔记A", "不存在的文件夹", "笔记B"];
   t("过滤不存在的文件夹", JSON.stringify(p.selectedPathSpec()) === JSON.stringify(["笔记A", "笔记B"]), JSON.stringify(p.selectedPathSpec()));
+
+  p.settings.selectedFolders = ["不存在的文件夹"];
+  const headBeforeMissing = git(["rev-parse", "HEAD"]).trim();
+  let missingBlocked = false;
+  try { await p.commitAll("must not sync all"); } catch (e) { missingBlocked = /同步文件夹不存在/.test(e.message); }
+  t("选中的文件夹全不存在时停止提交", missingBlocked && git(["rev-parse", "HEAD"]).trim() === headBeforeMissing);
 
   // --- 清空选择 = 整仓 ---
   p.settings.selectedFolders = [];

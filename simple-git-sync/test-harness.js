@@ -10,7 +10,7 @@ const STATUS = [];
 class Plugin {
   constructor(app, manifest) { this.app = app; this.manifest = manifest; }
   addStatusBarItem() {
-    return { setText: (t) => STATUS.push(t), addClass: () => {}, addEventListener: () => {} };
+    return { setText: (t) => STATUS.push(t), setAttr: () => {}, addClass: () => {}, addEventListener: () => {} };
   }
   registerDomEvent() {}
   registerInterval() {}
@@ -42,6 +42,12 @@ function mkApp(vaultPath) {
 }
 
 async function main() {
+  fs.mkdirSync(path.join(vault, "sub"), { recursive: true });
+  fs.mkdirSync(path.join(vault, ".obsidian"), { recursive: true });
+  fs.writeFileSync(path.join(vault, "note1.md"), "# one\n");
+  fs.writeFileSync(path.join(vault, "sub", "note2.md"), "# two\n");
+  fs.writeFileSync(path.join(vault, ".obsidian", "workspace.json"), "{}");
+  execFileSync("git", ["init", "--bare", "-b", "main", remote]);
   const p = new SimpleGitSyncPlugin(mkApp(vault), { id: "simple-git-sync" });
   await p.onload();
 

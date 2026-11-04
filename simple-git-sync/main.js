@@ -51,6 +51,27 @@ function errText(e) {
   return String((e.stdout || "") + (e.stderr || "") + (e.message || "")).trim();
 }
 
+function redactGitText(value, token) {
+  let result = String(value || "").replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1***:***@");
+  if (token) {
+    for (const secret of [token, encodeURIComponent(token)]) {
+      if (secret) result = result.split(secret).join("***");
+    }
+  }
+  return result;
+}
+
+function normalizeScopePath(value) {
+  const raw = String(value || "").trim().replace(/^\.\//, "").replace(/[\\/]+$/, "");
+  const parts = raw.replace(/\\/g, "/").split("/");
+  if (!raw || raw === "." || path.isAbsolute(raw) || /^[A-Za-z]:/.test(raw) ||
+      parts.some((part) => !part || part === "." || part === "..") ||
+      /[\[\]*?]/.test(raw) || raw.startsWith(":")) {
+    throw new Error("同步范围包含无效路径：" + value);
+  }
+  return parts.join("/");
+}
+
 function tail(text, n) {
   const lines = String(text || "").split(/\r?\n/).filter(function (l) { return l.trim().length > 0; });
   return lines.slice(-n).join("\n");
@@ -89,8 +110,18 @@ class ControlPanelModal extends Modal {
     info.style.background = "var(--background-secondary)";
     info.style.borderRadius = "6px";
 
-    const sel = p.selectedPathSpec();
-    const scopeText = sel.length ? sel.join("、") : "（未选，同步整仓）";
+    let scopeText = "整个 vault";
+    try {
+      const sel = p.selectedPathSpec();
+      if (Array.isArray(p.settings.selectedFolders) && p.settings.selectedFolders.length) {
+        scopeText = sel.length ? sel.join("、") : "所选文件夹不存在";
+      } else if (String(p.settings.syncPaths || "").trim()) {
+        const paths = p.pathSpec();
+        scopeText = paths.length ? paths.join("、") : "配置的范围不存在";
+      }
+    } catch (e) {
+      scopeText = "范围配置无效";
+    }
     const lastText = p.settings.lastSyncAt
       ? new Date(p.settings.lastSyncAt).toLocaleString("zh-CN")
       : "从未";
@@ -102,17 +133,9 @@ class ControlPanelModal extends Modal {
       const v = d.createEl("span", { text: value });
       if (color) v.style.color = color;
     };
-    row("仓库", p.isRepo() ? "已初始化" : "未初始化", p.isRepo() ? "" : "var(--text-error)");
-    if (p.isRepo()) {
-      const pref = p._vaultPrefix;
-      if (pref === undefined) {
-        row("本 vault 位置", "检测中…");
-      } else if (pref) {
-        row("本 vault 位置", "仓库内 " + pref.replace(/\/$/, ""));
-      } else {
-        row("本 vault 位置", "仓库根");
-      }
-    }
+    const repoText = p.isRepo() ? "已初始化（当前 vault 是独立仓库）" :
+      (p._repoRoot ? "位于父仓库内，请拆分仓库" : "未初始化");
+    row("仓库", repoText, p.isRepo() ? "" : "var(--text-error)");
     row("同步范围", scopeText);
     row("上次同步", lastText);
     if (p.settings.lastSyncResult) row("结果", p.settings.lastSyncResult);
@@ -146,8 +169,8 @@ class ControlPanelModal extends Modal {
     };
 
     const g1 = btnRow("同步");
-    mkBtn(g1, "同步选中", true, () => runAndRefresh(() => p.doSyncSelected()), "只同步勾选的文件夹");
-    mkBtn(g1, "全部同步", false, () => runAndRefresh(() => p.doSync(false)), "同步整个仓库");
+    mkBtn(g1, "同步选中", true, () => runAndRefresh(() => p.doSyncSelected()), "只提交勾选的文件夹；拉取仍更新整个仓库");
+    mkBtn(g1, "全部同步", false, () => runAndRefresh(() => p.doSync(false, true)), "提交当前 vault 的全部文件并拉取远程");
     mkBtn(g1, "上传", false, () => runAndRefresh(() => p.doUpload()), "只提交并推送");
     mkBtn(g1, "下载", false, () => runAndRefresh(() => p.doDownload()), "只拉取远程");
 
@@ -157,6 +180,9 @@ class ControlPanelModal extends Modal {
 
     // 其他
     const g3 = btnRow("维护");
+    if (!p.isRepo()) {
+      mkBtn(g3, "初始化并首次上传", false, () => runAndRefresh(() => p.doInit()));
+    }
     mkBtn(g3, "安装到 .obsidian", false, () => p.guard(() => p.doInstallToObsidian()), "源码 → 插件目录");
     mkBtn(g3, "隐藏 .gitignore/.gitattributes", false, () => runAndRefresh(() => p.doHideRepoFiles()), "从仓库移除，改用本地排除规则");
     if (p.isRepo()) {
@@ -231,7 +257,7 @@ class FolderPickerModal extends Modal {
     el.empty();
     el.createEl("h3", { text: "选择要同步的文件夹" });
     el.createEl("p", {
-      text: "勾选的文件夹才会被提交和推送，未勾选的原封不动。"
+      text: "只提交并推送勾选的文件夹；拉取远程时仍可能更新其他文件夹。"
     });
 
     const list = el.createDiv();
@@ -364,8 +390,9 @@ class SimpleGitSyncPlugin extends Plugin {
     this.addCommand({ id: "sync-selected", name: "同步选中的文件夹", callback: () => this.guard(() => this.doSyncSelected()) });
 
     this.addSettingTab(new SimpleGitSyncSettingTab(this.app, this));
-    // 启动时探测仓库结构（多 vault 场景：仓库根可能在父目录）
-    this.detectRepoRoot().then(() => this.updateStatusIdle()).catch(() => {});
+    await this.detectRepoRoot();
+    await this.loadRemoteFromOrigin();
+    this.updateStatusIdle();
     this.restartTimer();
   }
 
@@ -409,9 +436,12 @@ class SimpleGitSyncPlugin extends Plugin {
         },
         function (err, stdout, stderr) {
           if (err) {
-            err.stdout = stdout;
-            err.stderr = stderr;
-            reject(err);
+            const token = String(self.settings.token || "").trim();
+            const safe = new Error(redactGitText(err.message, token));
+            safe.code = err.code;
+            safe.stdout = redactGitText(stdout, token);
+            safe.stderr = redactGitText(stderr, token);
+            reject(safe);
             return;
           }
           resolve({ stdout: String(stdout || ""), stderr: String(stderr || "") });
@@ -420,29 +450,19 @@ class SimpleGitSyncPlugin extends Plugin {
     });
   }
 
-  // 仓库根可能不在 vault 根（多 vault 场景：MyObsidian/vaultA、MyObsidian/vaultB）
-  // 这里同步查一次，避免每次 git 操作都起进程
+  // 每个 vault 必须有自己的 .git；父目录的仓库不算当前 vault 的仓库。
   isRepo() {
-    // 不用缓存：fs.existsSync 很轻，且仓库可能在运行中被 init
-    // 先看自己目录，再向上找 .git（多 vault 场景仓库根在父目录）
     try {
-      let dir = this.getVaultPath();
-      for (let i = 0; i < 12; i++) {
-        if (fs.existsSync(path.join(dir, ".git"))) return true;
-        const parent = path.dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-      }
+      return fs.existsSync(path.join(this.getVaultPath(), ".git"));
     } catch (err) {
       return false;
     }
-    return false;
   }
 
-  // 异步版本：准确判断（向上查找 .git）
+  // 用于识别误放在父目录的旧仓库；不把它当作当前 vault 的仓库。
   async detectRepoRoot() {
     try {
-      const r = await this.runGit(["rev-parse", "--show-toplevel"]);
+      const r = await this.runGit(["rev-parse", "--show-toplevel"], { timeout: 5000 });
       this._repoRoot = r.stdout.trim().replace(/\\/g, "/");
     } catch (e) {
       this._repoRoot = null;
@@ -450,29 +470,29 @@ class SimpleGitSyncPlugin extends Plugin {
     return this._repoRoot;
   }
 
-  // vault 相对于仓库根的路径，如 "vaultA"；若 vault 就是仓库根则返回 ""
-  async vaultPrefix() {
-    if (this._vaultPrefix !== undefined) return this._vaultPrefix;
+  async loadRemoteFromOrigin() {
+    if (!this.isRepo() || String(this.settings.remoteUrl || "").trim()) return;
     try {
-      const r = await this.runGit(["rev-parse", "--show-prefix"]);
-      this._vaultPrefix = r.stdout.trim().replace(/\\/g, "/");
+      const r = await this.runGit(["remote", "get-url", "origin"], { timeout: 5000 });
+      let remote = r.stdout.trim();
+      if (/^https?:\/\//i.test(remote)) {
+        const u = new URL(remote);
+        u.username = "";
+        u.password = "";
+        remote = u.toString();
+      }
+      if (remote) {
+        this.settings.remoteUrl = remote;
+        await this.saveData(this.settings);
+      }
     } catch (e) {
-      this._vaultPrefix = "";
+      // 未设置 origin 时仍可在插件设置里手动填写。
     }
-    return this._vaultPrefix;
-  }
-
-  // 当前 vault 是否就是仓库根
-  async isVaultAtRepoRoot() {
-    const root = await this.detectRepoRoot();
-    if (!root) return false;
-    const v = this.getVaultPath().replace(/\\/g, "/").replace(/\/+$/, "");
-    return path.resolve(root) === path.resolve(v);
   }
 
   requireRepo() {
     if (!this.isRepo()) {
-      throw new Error("当前目录还不是 Git 仓库，请先执行命令「初始化仓库并首次上传」。");
+      throw new Error("当前 vault 根目录不是独立 Git 仓库。请在此初始化，或将远程仓库克隆为这个 vault。");
     }
   }
 
@@ -517,9 +537,11 @@ class SimpleGitSyncPlugin extends Plugin {
     const sel = Array.isArray(this.settings.selectedFolders) ? this.settings.selectedFolders : [];
     const root = this.getVaultPath();
     return sel.filter(function (name) {
+      const safe = normalizeScopePath(name);
+      if (safe !== name || safe.includes("/")) throw new Error("选中的文件夹路径无效：" + name);
       // 只保留真实存在的目录，避免 git add 报 pathspec 不匹配
       try {
-        return fs.statSync(path.join(root, name)).isDirectory();
+        return fs.statSync(path.join(root, safe)).isDirectory();
       } catch (e) {
         return false;
       }
@@ -532,31 +554,14 @@ class SimpleGitSyncPlugin extends Plugin {
     const raw = String(this.settings.syncPaths || "").trim();
     if (!raw) return [];
     const root = this.getVaultPath();
-    const self = this;
     return raw
       .split(/\r?\n/)
-      .map(function (s) {
-        return s
-          .trim()
-          .replace(/^\.\//, "")      // 只去掉 "./" 前缀
-          .replace(/^\/+/, "")       // 只去掉开头的斜杠
-          .replace(/[\\/]+$/, "");  // 去掉尾部斜杠（保留 .obsidian 开头的点）
-      })
-      .filter(function (s) { return s.length > 0; })
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean)
+      .map(normalizeScopePath)
       // 目录还不存在时不能传给 git，否则 git add 会 fatal: pathspec did not match
       .filter(function (s) { return fs.existsSync(path.join(root, s)); })
       .filter(function (s) { return s !== ".git" && s.indexOf(".git/") !== 0; });
-  }
-
-  // 把「当前 vault」作为 pathspec 前缀：多 vault 时只影响本 vault
-  async scopedSpec(spec) {
-    const list = (spec || []).slice();
-    if (await this.isVaultAtRepoRoot()) {
-      return list; // vault 就是仓库根，无需限定
-    }
-    // vault 是子目录：所有路径都相对 vault 根，git 在 vault 目录下执行时天然限定
-    // 但为了安全（比如 spec 为空表示"整个 vault"），加 "." 显式限定
-    return list.length ? list : ["."];
   }
 
   async hasChanges(spec) {
@@ -566,42 +571,29 @@ class SimpleGitSyncPlugin extends Plugin {
     return r.stdout.trim().length > 0;
   }
 
-  async commitAll(message) {
-    // 先把 .gitignore/.gitattributes 从索引移除（本地文件保留），
-    // 这样它们不会出现在远程仓库里。
-    // 注意：移除操作在仓库根，不在 selectedFolders 范围内，
-    // 所以必须单独检测并提交，否则会被 hasChanges() 判定为"无改动"而漏掉
-    await this.untrackRepoFiles();
-    const hasUntracked = await this.hasStagedRemoval();
-
-    // 优先用「选中的文件夹」，没选则回退到 syncPaths，再没有就整仓
-    let spec = this.selectedPathSpec();
-    if (spec.length === 0) spec = this.pathSpec();
-    const rawConfigured = String(this.settings.syncPaths || "").trim();
-    // 配置了范围但目录一个都还没建：退化为整仓提交，避免「同步成功但什么都没存」
-    if (rawConfigured && spec.length === 0) {
-      this.lastSpecFallback = true;
-      const addAll = ["add", "-A"];
-      await this.runGit(addAll);
-      if (!(await this.hasChanges([]))) return false;
-      await this.runGit(["commit", "-m", message]);
-      return true;
+  async commitAll(message, forceAll) {
+    this.requireRepo();
+    // 配置过范围时，绝不能因目录暂时不存在而提交整仓。
+    const selected = Array.isArray(this.settings.selectedFolders) ? this.settings.selectedFolders : [];
+    const configured = String(this.settings.syncPaths || "").trim();
+    const spec = forceAll ? [] : (selected.length ? this.selectedPathSpec() : this.pathSpec());
+    if (!forceAll && (selected.length || configured) && spec.length === 0) {
+      throw new Error("配置的同步文件夹不存在，请检查同步范围；本次没有提交任何文件。");
     }
-    this.lastSpecFallback = false;
-    // 关键：vault 是子目录时，必须加 "." 限定，否则 git add -A 会扫到兄弟 vault
-    const scoped = await this.scopedSpec(spec);
+    await this.ensureRepoFiles();
+    await this.assertNoTrackedPrivateFiles();
+    // 优先用「选中的文件夹」，没选则回退到 syncPaths，再没有就整仓
+    const scoped = spec;
     const addArgs = ["add", "-A"];
     if (scoped.length) addArgs.push("--");
     await this.runGit(scoped.length ? addArgs.concat(scoped) : addArgs);
 
-    // 有 .gitxxx 的移除时，即使选中范围没改动也要提交
-    const changed = (await this.hasChanges(scoped)) || hasUntracked;
-    if (!changed) return false;
+    if (!(await this.hasChanges(scoped))) return false;
 
-    // 有移除时提交整个索引（不带 pathspec），否则只提交选中范围
+    // 带 pathspec 提交，避免把其他已暂存的改动混进选定文件夹。
     const commitArgs = ["commit", "-m", message];
-    if (scoped.length && !hasUntracked) commitArgs.push("--");
-    await this.runGit(scoped.length && !hasUntracked ? commitArgs.concat(scoped) : commitArgs);
+    if (scoped.length) commitArgs.push("--");
+    await this.runGit(scoped.length ? commitArgs.concat(scoped) : commitArgs);
     return true;
   }
 
@@ -649,7 +641,21 @@ class SimpleGitSyncPlugin extends Plugin {
         fs.appendFileSync(excludePath, block, "utf8");
       }
     } catch (e) {
-      console.error("[simple-git-sync] 写 info/exclude 失败", e);
+      throw new Error("无法写入 Git 本地排除规则，已停止提交以保护访问令牌：" + errText(e));
+    }
+  }
+
+  async assertNoTrackedPrivateFiles() {
+    const r = await this.runGit(["ls-files", "-z", "--cached"]);
+    const files = r.stdout.split("\0").filter(Boolean);
+    const privateFiles = files.filter(function (file) {
+      const name = file.replace(/\\/g, "/");
+      return /(^|\/)\.obsidian\/(workspace(?:-mobile)?\.json|cache(?:\/|$))/.test(name) ||
+        /(^|\/)\.obsidian\/plugins\/[^/]+\/data\.json$/.test(name);
+    });
+    if (privateFiles.length) {
+      throw new Error("这些本地私有文件已被 Git 跟踪，已停止同步以免上传令牌或设备状态：" +
+        privateFiles.join("、") + "。请先用 git rm --cached 移除跟踪，并检查远程历史。");
     }
   }
 
@@ -668,11 +674,7 @@ class SimpleGitSyncPlugin extends Plugin {
     // 注意：在 vault 子目录执行时，":.gitignore" 会被解析成 vaultA/.gitignore
     // 必须用 ":(top)" 魔法前缀指向仓库根
     for (const f of [".gitignore", ".gitattributes"]) {
-      try {
-        await this.runGit(["rm", "--cached", "--ignore-unmatch", "--", ":(top)" + f]);
-      } catch (e) {
-        // 没跟踪过会失败，忽略
-      }
+      await this.runGit(["rm", "--cached", "--ignore-unmatch", "--", ":(top)" + f]);
     }
   }
 
@@ -686,7 +688,7 @@ class SimpleGitSyncPlugin extends Plugin {
 
   async pushWithHint() {
     try {
-      await this.runGit(["push", this.authedUrl(), this.settings.branch || "main"], { timeout: 180000 });
+      await this.runGit(["push", this.authedUrl(), "HEAD:refs/heads/" + (this.settings.branch || "main")], { timeout: 180000 });
     } catch (e) {
       const t = errText(e);
       if (/rejected|non-fast-forward|fetch first/i.test(t)) {
@@ -705,36 +707,34 @@ class SimpleGitSyncPlugin extends Plugin {
         ["pull", "--no-rebase", "--no-edit", this.authedUrl(), this.settings.branch || "main"],
         { timeout: 180000 }
       );
+      return true;
     } catch (e) {
       const t = errText(e);
       if (/CONFLICT|Automatic merge failed/i.test(t)) {
         throw new Error("拉取时出现冲突，请在 Obsidian 里手动解决冲突后再执行「同步」。\n" + tail(t, 6));
       }
       // 远程还是空仓库（第一次同步前）：pull 失败是正常的，交给后面的 push 建分支
-      if (/couldn't find remote ref|no such ref|not our ref|does not appear to be a git repository/i.test(t)) {
-        return;
+      if (/couldn't find remote ref|no such ref|not our ref/i.test(t)) {
+        return false;
       }
       throw e;
     }
   }
 
   async doInit() {
+    if (this.isRepo()) throw new Error("当前 vault 已位于 Git 仓库中，请用「上传」；初始化会改动现有仓库的远程配置。");
+    const parentRoot = await this.detectRepoRoot();
+    if (parentRoot) throw new Error("当前 vault 位于父目录的 Git 仓库内。请先把每个 vault 拆成独立仓库，再初始化。");
     this.requireRemote();
-    if (!this.isRepo()) {
-      await this.runGit(["init"]);
-      await this.runGit(["symbolic-ref", "HEAD", "refs/heads/" + (this.settings.branch || "main")]);
-    }
+    await this.runGit(["init"]);
+    await this.runGit(["symbolic-ref", "HEAD", "refs/heads/" + (this.settings.branch || "main")]);
     await this.ensureRepoFiles();
     await this.ensureIdentity();
-    await this.runGit(["remote", "remove", "origin"]).catch(function () {});
     await this.runGit(["remote", "add", "origin", String(this.settings.remoteUrl).trim()]);
     const committed = await this.commitAll("初始提交 " + stamp());
     await this.pushWithHint();
-    // init 后仓库结构变了，清缓存重新探测
-    this._repoRoot = undefined;
-    this._vaultPrefix = undefined;
+    // init 后仓库结构变了，重新探测。
     await this.detectRepoRoot();
-    await this.vaultPrefix();
     this.markSynced(committed ? "首次上传完成" : "首次上传完成（无新改动）", false);
   }
 
@@ -747,13 +747,13 @@ class SimpleGitSyncPlugin extends Plugin {
 
   async doDownload() {
     this.requireRepo();
-    await this.pullWithHint();
-    this.markSynced("已下载", false);
+    const pulled = await this.pullWithHint();
+    this.markSynced(pulled ? "已下载" : "远程暂无可下载内容", false);
   }
 
-  async doSync(silent) {
+  async doSync(silent, forceAll) {
     this.requireRepo();
-    const committed = await this.commitAll("vault sync " + stamp());
+    const committed = await this.commitAll("vault sync " + stamp(), forceAll);
     await this.pullWithHint();
     await this.pushWithHint();
     this.markSynced(committed ? "已同步" : "已同步（无新改动）", silent);
@@ -900,15 +900,24 @@ class SimpleGitSyncPlugin extends Plugin {
   async doHideRepoFiles() {
     this.requireRepo();
     await this.ensureRepoFiles();   // 确保本地文件存在 + info/exclude 已写入
+    await this.assertNoTrackedPrivateFiles();
+    const staged = await this.runGit(["diff", "--cached", "--name-only"]);
+    if (staged.stdout.trim()) throw new Error("索引中已有暂存改动，请先处理这些改动，再隐藏 .gitignore/.gitattributes。");
     await this.untrackRepoFiles();  // 从索引移除
-    const committed = await this.commitAll("隐藏 .gitignore / .gitattributes（改用 .git/info/exclude）");
+    const committed = await this.hasStagedRemoval();
+    if (committed) {
+      await this.ensureIdentity();
+      await this.runGit(["commit", "-m", "隐藏 .gitignore / .gitattributes（改用 .git/info/exclude）"]);
+    }
     await this.pushWithHint();
     this.markSynced(committed ? "已隐藏 .gitxxx 并推送" : "已隐藏 .gitxxx", false);
   }
 
   async doAbortMerge() {
     this.requireRepo();
-    await this.runGit(["merge", "--abort"]).catch(function () {});
+    const merge = await this.runGit(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).catch(function () { return null; });
+    if (!merge) throw new Error("当前没有未完成的合并。");
+    await this.runGit(["merge", "--abort"]);
     new Notice("已取消未完成的合并。");
     this.setStatus("就绪");
   }
@@ -920,7 +929,6 @@ class SimpleGitSyncPlugin extends Plugin {
     }
     // 每次操作重新探测仓库结构（可能刚 init 或换了 vault）
     this._repoRoot = undefined;
-    this._vaultPrefix = undefined;
     this.syncing = true;
     this.setStatus("同步中…");
     try {
@@ -945,10 +953,12 @@ class SimpleGitSyncPlugin extends Plugin {
   setStatus(text) {
     if (!this.statusBar) return;
     if (text === "就绪") {
-      const sel = this.selectedPathSpec();
+      let sel;
+      try { sel = this.selectedPathSpec(); }
+      catch (e) { sel = []; text = "范围配置错误"; }
       if (sel.length === 1) text = "就绪 · " + sel[0];
       else if (sel.length > 1) text = "就绪 · " + sel[0] + " 等 " + sel.length + " 个";
-      else text = "就绪 · 未选文件夹";
+      else if (text === "就绪") text = String(this.settings.syncPaths || "").trim() ? "就绪 · 指定范围" : "就绪 · 整个 vault";
     }
     const t = new Date();
     const hh = String(t.getHours()).padStart(2, "0");
@@ -999,7 +1009,7 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(c)
       .setName("仓库地址")
-      .setDesc("GitHub 仓库的 HTTPS 地址，以 .git 结尾")
+      .setDesc("首次上传时填写仓库地址；从远程克隆的 vault 会自动读取 origin，也可在这里修改")
       .addText(function (t) {
         return t
           .setPlaceholder("https://github.com/用户名/仓库名.git")
@@ -1108,7 +1118,7 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(c)
       .setName("同步范围")
-      .setDesc("每行一个目录。留空 = 整个仓库。例如：notes 和 .obsidian（不含插件目录），这样笔记同步不会碰 plugins/")
+      .setDesc("每行一个目录，限制提交和推送的本地改动；拉取仍更新整个仓库。留空 = 当前 vault 的全部文件")
       .addTextArea(function (t) {
         t.inputEl.rows = 4;
         t.inputEl.style.width = "100%";
@@ -1181,7 +1191,7 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
       }.bind(this));
 
     c.createEl("p", {
-      text: "提示：设置（含令牌）保存在 .obsidian/plugins/simple-git-sync/data.json，该文件已自动写入 .gitignore，不会被上传。"
+      text: "提示：设置（含令牌）保存在 .obsidian/plugins/simple-git-sync/data.json。同步前会设置本地排除规则；若文件已被 Git 跟踪，同步会停止。"
     });
   }
 }

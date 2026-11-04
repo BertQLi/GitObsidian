@@ -9,7 +9,7 @@ const MODALS = [];
 
 class Plugin {
   constructor(app, m) { this.app = app; this.manifest = m; }
-  addStatusBarItem() { return { setText: () => {}, addClass: () => {} }; }
+  addStatusBarItem() { return { setText: () => {}, setAttr: () => {}, addClass: () => {} }; }
   registerDomEvent() {} registerInterval() {} addCommand() {} addSettingTab() {}
   async loadData() { return this._data || {}; }
   async saveData(d) { this._data = d; }

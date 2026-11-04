@@ -32,7 +32,7 @@ const SimpleGitSyncPlugin = require(path.join(__dirname, "main.js"));
 
 const tmp = process.argv[2];
 const repoRoot = path.join(tmp, "MyObsidian");
-const vault = path.join(repoRoot, "vaultA");
+const vault = repoRoot;
 const remote = path.join(tmp, "remote.git");
 const mkApp = (v) => ({ vault: { adapter: { getBasePath: () => v } }, plugins: {} });
 const results = [];
@@ -56,7 +56,7 @@ async function main() {
   // 初始只提交 .gitignore/.gitattributes（模拟迁移前状态）
   // data.json / workspace.json 一开始就不该进仓库
   git(["add", ".gitignore", ".gitattributes"], repoRoot);
-  git(["add", "vaultA/SIGMOD2027", "vaultA/.obsidian/app.json"], repoRoot);
+  git(["add", "SIGMOD2027", ".obsidian/app.json"], repoRoot);
   git(["commit", "-m", "init"], repoRoot);
   git(["remote", "add", "origin", remote], repoRoot);
   git(["push", "origin", "main"], repoRoot);
@@ -94,8 +94,8 @@ async function main() {
     try { execFileSync("git", ["check-ignore", "-q", f], { cwd: repoRoot, stdio: "ignore" }); return true; }
     catch { return false; }
   };
-  t("data.json 仍被忽略", checkIgnore("vaultA/.obsidian/plugins/simple-git-sync/data.json"), "");
-  t("workspace.json 仍被忽略", checkIgnore("vaultA/.obsidian/workspace.json"), "");
+  t("data.json 仍被忽略", checkIgnore(".obsidian/plugins/simple-git-sync/data.json"), "");
+  t("workspace.json 仍被忽略", checkIgnore(".obsidian/workspace.json"), "");
   t(".gitignore 本身被忽略", checkIgnore(".gitignore"), "");
 
   // --- 再次 commitAll 不会把 .gitxxx 加回来 ---
@@ -123,6 +123,39 @@ async function main() {
   await p.doHideRepoFiles();
   const excludeAfter = fs.readFileSync(excludePath, "utf8");
   t("重复执行不重复写 exclude", excludeBefore === excludeAfter, "len " + excludeBefore.length + " -> " + excludeAfter.length);
+
+  // 已存在的 Git 仓库直接上传时，也必须先安装本地排除规则。
+  const existing = path.join(tmp, "existingVault");
+  const existingRemote = path.join(tmp, "existingRemote.git");
+  const dataFile = path.join(existing, ".obsidian", "plugins", "simple-git-sync", "data.json");
+  fs.mkdirSync(path.dirname(dataFile), { recursive: true });
+  fs.writeFileSync(dataFile, '{"token":"SECRET"}');
+  fs.writeFileSync(path.join(existing, "note.md"), "# note\n");
+  git(["init", "--bare", "-b", "main", existingRemote], tmp);
+  git(["init", "-b", "main", existing], tmp);
+  git(["config", "user.name", "T"], existing);
+  git(["config", "user.email", "t@x.com"], existing);
+  git(["remote", "add", "origin", "https://example.invalid/original.git"], existing);
+  const pExisting = new SimpleGitSyncPlugin(mkApp(existing), {});
+  await pExisting.onload();
+  pExisting.settings.remoteUrl = existingRemote;
+  let initRefused = false;
+  try { await pExisting.doInit(); } catch (e) { initRefused = /已位于 Git 仓库/.test(e.message); }
+  t("初始化不会覆盖已有仓库的 origin", initRefused &&
+    git(["remote", "get-url", "origin"], existing).trim() === "https://example.invalid/original.git");
+  await pExisting.doUpload();
+  const existingFiles = git(["--git-dir=" + existingRemote, "ls-tree", "-r", "--name-only", "main"], tmp);
+  t("已有仓库直接上传时令牌文件未进入远程", !existingFiles.includes("data.json"), existingFiles);
+
+  pExisting.settings.branch = "notes";
+  fs.writeFileSync(path.join(existing, "note.md"), "# other branch\n");
+  await pExisting.doUpload();
+  t("已有仓库可推到配置的远程分支", git(["--git-dir=" + existingRemote, "show", "notes:note.md"], tmp).includes("other branch"));
+
+  git(["add", "-f", ".obsidian/plugins/simple-git-sync/data.json"], existing);
+  let blocked = false;
+  try { await pExisting.commitAll("must not leak"); } catch (e) { blocked = /私有文件已被 Git 跟踪/.test(e.message); }
+  t("令牌文件已被跟踪时拒绝继续同步", blocked);
 
   console.log(results.join("\n"));
   const failed = results.filter((r) => r.startsWith("FAIL")).length;

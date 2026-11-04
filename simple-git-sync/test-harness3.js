@@ -7,7 +7,7 @@ const { execFileSync } = require("child_process");
 const NOTICES = [];
 class Plugin {
   constructor(app, m) { this.app = app; this.manifest = m; }
-  addStatusBarItem() { return { setText: () => {}, addClass: () => {} }; }
+  addStatusBarItem() { return { setText: () => {}, setAttr: () => {}, addClass: () => {} }; }
   registerDomEvent() {} registerInterval() {} addCommand() {} addSettingTab() {}
   async loadData() { return this._data || {}; }
   async saveData(d) { this._data = d; }
@@ -106,7 +106,7 @@ async function main() {
   p.settings.syncPaths = "notes\n不存在的目录";
   t("pathSpec 过滤不存在的目录", JSON.stringify(p.pathSpec()) === JSON.stringify(["notes"]), JSON.stringify(p.pathSpec()));
 
-  // 配置了范围但目录全不存在 -> 退化整仓，不能报错
+  // 配置了范围但目录全不存在时必须停止，不能误传整仓
   const emptyVault = path.join(tmp, "emptyvault");
   fs.mkdirSync(emptyVault, { recursive: true });
   fs.writeFileSync(path.join(emptyVault, "x.md"), "# x\n");
@@ -119,10 +119,18 @@ async function main() {
   p3.settings.syncPaths = "notes";
   try {
     await p3.doInit();
-    t("配置的目录都不存在时退化为整仓（不崩）", true);
+    t("配置的目录都不存在时停止提交", false, "意外成功");
   } catch (e) {
-    t("配置的目录都不存在时退化为整仓（不崩）", false, e.message);
+    t("配置的目录都不存在时停止提交", /同步文件夹不存在/.test(e.message), e.message);
   }
+  t("范围不存在时根目录文件未提交", git(["status", "--porcelain"], emptyVault).includes("x.md"));
+  await p3.doDownload();
+  t("空远程不会误报已下载", p3.settings.lastSyncResult === "远程暂无可下载内容", p3.settings.lastSyncResult);
+
+  p.settings.syncPaths = "../plugins";
+  let invalidPath = false;
+  try { p.pathSpec(); } catch (e) { invalidPath = /无效路径/.test(e.message); }
+  t("拒绝越出 vault 的同步路径", invalidPath);
 
   console.log(results.join("\n"));
   const failed = results.filter((r) => r.startsWith("FAIL")).length;
