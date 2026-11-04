@@ -1,9 +1,13 @@
 "use strict";
 
-const { Plugin, PluginSettingTab, Setting, Notice, Modal } = require("obsidian");
+const { Plugin, PluginSettingTab, Setting, Notice, Modal, requestUrl, requireApiVersion } = require("obsidian");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { createHash } = require("crypto");
+const { Script } = require("vm");
+const UPDATE_REPO = "BertQLi/GitObsidian";
+const UPDATE_API = "https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest";
 
 const GITIGNORE = [
   "# 每台设备自己的界面布局，同步会冲突",
@@ -12,6 +16,7 @@ const GITIGNORE = [
   ".obsidian/cache",
   "",
   "# 本插件设置里存着访问令牌，绝对不能提交",
+  ".obsidian/plugins/simple-git-sync/",
   ".obsidian/plugins/simple-git-sync/data.json",
   "",
   "# 系统垃圾",
@@ -40,6 +45,8 @@ const DEFAULT_SETTINGS = {
   pluginSourceDir: "plugins/simple-git-sync",
   syncPaths: "",
   selectedFolders: [],
+  autoUpdate: true,
+  lastUpdateCheckAt: 0,
   autoSync: false,
   autoSyncMinutes: 10,
   lastSyncAt: 0,
@@ -59,6 +66,15 @@ function redactGitText(value, token) {
     }
   }
   return result;
+}
+
+function compareVersions(a, b) {
+  const left = String(a).split(".").map(Number);
+  const right = String(b).split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (left[i] !== right[i]) return left[i] > right[i] ? 1 : -1;
+  }
+  return 0;
 }
 
 function normalizeScopePath(value) {
@@ -91,6 +107,7 @@ class ControlPanelModal extends Modal {
   onOpen() {
     const el = this.contentEl;
     el.empty();
+    if (this.plugin.panels) this.plugin.panels.add(this);
     this.render();
   }
 
@@ -136,59 +153,56 @@ class ControlPanelModal extends Modal {
     const repoText = p.isRepo() ? "已初始化（当前 vault 是独立仓库）" :
       (p._repoRoot ? "位于父仓库内，请拆分仓库" : "未初始化");
     row("仓库", repoText, p.isRepo() ? "" : "var(--text-error)");
-    row("同步范围", scopeText);
-    row("上次同步", lastText);
+    row("提交范围", scopeText);
+    row("上次成功", lastText);
+    if (p.lastOperationError) row("需要处理", p.lastOperationError, "var(--text-error)");
+    if (p.autoSyncPaused) row("自动同步", "已暂停，请先处理合并冲突");
     if (p.settings.lastSyncResult) row("结果", p.settings.lastSyncResult);
 
-    // ---------- 主操作 ----------
-    const btnRow = (title) => {
-      const t = el.createEl("div", { text: title });
-      t.style.fontSize = "11px";
-      t.style.opacity = "0.6";
-      t.style.margin = "10px 0 6px";
-      return el.createDiv();
-    };
-
+    const busy = p.syncing || p.updating;
     const mkBtn = (parent, label, cta, onClick, tooltip) => {
       const b = parent.createEl("button", { text: label });
       b.style.marginRight = "6px";
       b.style.marginBottom = "6px";
+      b.disabled = !!busy;
       if (cta) b.addClass("mod-cta");
       if (tooltip) b.title = tooltip;
       b.addEventListener("click", async () => {
-        await onClick();
+        if (p.syncing || p.updating) return;
+        const pending = onClick();
+        this.render();
+        await pending;
+        if (p.unloaded) { this.close(); return; }
+        this.detailText = undefined;
+        this.render();
       });
       return b;
     };
+    const run = (fn) => p.guard(fn);
+    const primary = el.createDiv();
+    const label = busy ? (p.phase || "处理中…") : (p.isRepo() ? "立即同步" : "初始化并首次同步");
+    mkBtn(primary, label, true, () => run(() => p.isRepo() ? p.doSync(false) : p.doInit()),
+      "保存本地改动 → 合并远程改动 → 上传，自动同步也使用同一提交范围");
+    const hint = el.createEl("p", { text: "保存本地改动 → 合并远程改动 → 上传" });
+    hint.style.fontSize = "12px";
+    hint.style.opacity = "0.7";
 
-    // 同步
-    const runAndRefresh = async (fn) => {
-      await p.guard(fn);
-      this.detailText = undefined;
-      this.render();
-    };
+    const options = el.createDiv();
+    mkBtn(options, "提交范围…", false, async () => p.doChooseFolders(() => this.render()));
+    mkBtn(options, "检查更新", false, () => run(() => p.checkForUpdates(false)));
+    options.createEl("small", { text: "v" + p.manifest.version });
 
-    const g1 = btnRow("同步");
-    mkBtn(g1, "同步选中", true, () => runAndRefresh(() => p.doSyncSelected()), "只提交勾选的文件夹；拉取仍更新整个仓库");
-    mkBtn(g1, "全部同步", false, () => runAndRefresh(() => p.doSync(false, true)), "提交当前 vault 的全部文件并拉取远程");
-    mkBtn(g1, "上传", false, () => runAndRefresh(() => p.doUpload()), "只提交并推送");
-    mkBtn(g1, "下载", false, () => runAndRefresh(() => p.doDownload()), "只拉取远程");
-
-    // 文件夹
-    const g2 = btnRow("文件夹");
-    mkBtn(g2, "选择要同步的文件夹", false, () => p.doChooseFolders());
-
-    // 其他
-    const g3 = btnRow("维护");
-    if (!p.isRepo()) {
-      mkBtn(g3, "初始化并首次上传", false, () => runAndRefresh(() => p.doInit()));
-    }
-    mkBtn(g3, "安装到 .obsidian", false, () => p.guard(() => p.doInstallToObsidian()), "源码 → 插件目录");
-    mkBtn(g3, "隐藏 .gitignore/.gitattributes", false, () => runAndRefresh(() => p.doHideRepoFiles()), "从仓库移除，改用本地排除规则");
-    if (p.isRepo()) {
-      mkBtn(g3, "取消未完成的合并", false, () => p.guard(() => p.doAbortMerge()));
-    }
-    mkBtn(g3, "刷新", false, () => this.render());
+    const advanced = el.createEl("details");
+    advanced.style.marginTop = "12px";
+    advanced.createEl("summary", { text: "高级操作" });
+    const actions = advanced.createDiv();
+    actions.style.marginTop = "8px";
+    mkBtn(actions, "仅上传", false, () => run(() => p.doUpload()), "提交所选范围并推送整个分支，不下载");
+    mkBtn(actions, "仅下载", false, () => run(() => p.doDownload()), "拉取整个分支，不提交本地改动");
+    mkBtn(actions, "同步整个 vault", false, () => run(() => p.doSync(false, true)), "本次忽略提交范围，包含整个 vault");
+    if (p.isRepo()) mkBtn(actions, "取消未完成的合并", false, () => run(() => p.doAbortMerge()));
+    mkBtn(actions, "从本地源码安装", false, () => run(() => p.doInstallToObsidian()));
+    mkBtn(actions, "刷新状态", false, async () => { this.detailText = undefined; });
 
     // ---------- 折叠的详细信息 ----------
     const detail = el.createEl("details");
@@ -241,6 +255,7 @@ class ControlPanelModal extends Modal {
   }
 
   onClose() {
+    if (this.plugin.panels) this.plugin.panels.delete(this);
     this.contentEl.empty();
   }
 }
@@ -371,6 +386,9 @@ class SimpleGitSyncPlugin extends Plugin {
     await this.loadSettings();
     this.syncing = false;
     this.timer = null;
+    this.panels = new Set();
+    this.updating = false;
+    this.unloaded = false;
 
     this.statusBar = this.addStatusBarItem();
     this.statusBar.addClass("mod-clickable");
@@ -387,16 +405,20 @@ class SimpleGitSyncPlugin extends Plugin {
     this.addCommand({ id: "install-to-obsidian", name: "安装到 .obsidian（源码目录 → 插件目录）", callback: () => this.guard(() => this.doInstallToObsidian()) });
     this.addCommand({ id: "choose-folders", name: "选择要同步的文件夹", callback: () => this.doChooseFolders() });
     this.addCommand({ id: "hide-repo-files", name: "隐藏 .gitignore / .gitattributes（从仓库移除）", callback: () => this.guard(() => this.doHideRepoFiles()) });
-    this.addCommand({ id: "sync-selected", name: "同步选中的文件夹", callback: () => this.guard(() => this.doSyncSelected()) });
+    this.addCommand({ id: "check-update", name: "检查插件更新", callback: () => this.guard(() => this.checkForUpdates(false)) });
 
     this.addSettingTab(new SimpleGitSyncSettingTab(this.app, this));
     await this.detectRepoRoot();
     await this.loadRemoteFromOrigin();
     this.updateStatusIdle();
     this.restartTimer();
+    this.restartUpdateTimer();
   }
 
   onunload() {
+    this.unloaded = true;
+    clearTimeout(this.updateTimer);
+    clearInterval(this.updateInterval);
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -410,6 +432,7 @@ class SimpleGitSyncPlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.restartTimer();
+    this.restartUpdateTimer();
   }
 
   getVaultPath() {
@@ -573,6 +596,11 @@ class SimpleGitSyncPlugin extends Plugin {
 
   async commitAll(message, forceAll) {
     this.requireRepo();
+    const unmerged = await this.runGit(["diff", "--name-only", "--diff-filter=U", "-z"]);
+    if (unmerged.stdout) {
+      this.autoSyncPaused = true;
+      throw new Error("仍有未解决的合并冲突，请先解决冲突或取消合并，再同步。");
+    }
     // 配置过范围时，绝不能因目录暂时不存在而提交整仓。
     const selected = Array.isArray(this.settings.selectedFolders) ? this.settings.selectedFolders : [];
     const configured = String(this.settings.syncPaths || "").trim();
@@ -601,6 +629,9 @@ class SimpleGitSyncPlugin extends Plugin {
   // 这些规则同时写进 .git/info/exclude —— 它不进仓库，所以远程看不到 .gitignore
   protectedPatterns() {
     return [
+      "**/.obsidian/plugins/simple-git-sync/",
+      "**/.obsidian/plugins/simple-git-sync/.update-backup/",
+      "**/.obsidian/plugins/simple-git-sync/.update-*.tmp",
       "**/.obsidian/workspace.json",
       "**/.obsidian/workspace-mobile.json",
       "**/.obsidian/cache",
@@ -635,8 +666,10 @@ class SimpleGitSyncPlugin extends Plugin {
       const excludePath = path.join(gitDir, "info", "exclude");
       const marker = "# simple-git-sync";
       const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf8") : "";
-      if (existing.indexOf(marker) === -1) {
-        const block = "\n" + marker + "\n" + this.protectedPatterns().join("\n") + "\n";
+      const rules = existing.split(/\r?\n/);
+      const missing = this.protectedPatterns().filter((rule) => !rules.includes(rule));
+      if (missing.length) {
+        const block = "\n" + marker + "\n" + missing.join("\n") + "\n";
         fs.mkdirSync(path.dirname(excludePath), { recursive: true });
         fs.appendFileSync(excludePath, block, "utf8");
       }
@@ -711,6 +744,7 @@ class SimpleGitSyncPlugin extends Plugin {
     } catch (e) {
       const t = errText(e);
       if (/CONFLICT|Automatic merge failed/i.test(t)) {
+        this.autoSyncPaused = true;
         throw new Error("拉取时出现冲突，请在 Obsidian 里手动解决冲突后再执行「同步」。\n" + tail(t, 6));
       }
       // 远程还是空仓库（第一次同步前）：pull 失败是正常的，交给后面的 push 建分支
@@ -740,6 +774,8 @@ class SimpleGitSyncPlugin extends Plugin {
 
   async doUpload() {
     this.requireRepo();
+    await this.ensureIdentity();
+    this.setPhase("提交并上传…");
     const committed = await this.commitAll("vault sync " + stamp());
     await this.pushWithHint();
     this.markSynced(committed ? "已上传" : "已上传（无新改动）", false);
@@ -747,14 +783,19 @@ class SimpleGitSyncPlugin extends Plugin {
 
   async doDownload() {
     this.requireRepo();
+    this.setPhase("下载远程改动…");
     const pulled = await this.pullWithHint();
     this.markSynced(pulled ? "已下载" : "远程暂无可下载内容", false);
   }
 
   async doSync(silent, forceAll) {
     this.requireRepo();
+    await this.ensureIdentity();
+    this.setPhase("1/3 保存本地改动…");
     const committed = await this.commitAll("vault sync " + stamp(), forceAll);
+    this.setPhase("2/3 合并远程改动…");
     await this.pullWithHint();
+    this.setPhase("3/3 上传…");
     await this.pushWithHint();
     this.markSynced(committed ? "已同步" : "已同步（无新改动）", silent);
   }
@@ -865,12 +906,13 @@ class SimpleGitSyncPlugin extends Plugin {
     ).open();
   }
 
-  doChooseFolders() {
+  doChooseFolders(onSaved) {
     const folders = this.listFolders();
     const current = Array.isArray(this.settings.selectedFolders) ? this.settings.selectedFolders : [];
     const self = this;
     new FolderPickerModal(this.app, folders, current, async function (result) {
       self.settings.selectedFolders = result;
+      self.settings.syncPaths = "";
       await self.saveSettings();
       if (result.length === 0) {
         new Notice("已清空选择：之后同步会处理整个仓库。");
@@ -878,6 +920,7 @@ class SimpleGitSyncPlugin extends Plugin {
         new Notice("已选择 " + result.length + " 个文件夹：" + result.join("、"));
       }
       self.updateStatusIdle();
+      if (onSaved) onSaved();
     }).open();
   }
 
@@ -918,31 +961,45 @@ class SimpleGitSyncPlugin extends Plugin {
     const merge = await this.runGit(["rev-parse", "-q", "--verify", "MERGE_HEAD"]).catch(function () { return null; });
     if (!merge) throw new Error("当前没有未完成的合并。");
     await this.runGit(["merge", "--abort"]);
+    this.autoSyncPaused = false;
+    this.lastOperationError = "";
     new Notice("已取消未完成的合并。");
     this.setStatus("就绪");
   }
 
   async guard(fn) {
-    if (this.syncing) {
-      new Notice("正在同步中，请稍候…");
+    if (this.syncing || this.updating) {
+      new Notice("正在处理中，请稍候…");
       return;
     }
     // 每次操作重新探测仓库结构（可能刚 init 或换了 vault）
     this._repoRoot = undefined;
     this.syncing = true;
-    this.setStatus("同步中…");
+    this.lastOperationError = "";
+    this.setPhase("处理中…");
     try {
       await fn();
     } catch (e) {
-      new Notice("同步失败：" + tail(errText(e), 6), 12000);
+      this.lastOperationError = (this.phase || "操作失败") + " " + tail(errText(e), 2);
+      new Notice("操作失败：" + tail(errText(e), 6), 12000);
       this.setStatus("失败");
       console.error("[simple-git-sync]", e);
     } finally {
       this.syncing = false;
+      this.phase = "";
+      if (this.panels) this.panels.forEach((panel) => panel.render());
     }
   }
 
+  setPhase(text) {
+    this.phase = text;
+    this.setStatus(text);
+    if (this.panels) this.panels.forEach((panel) => panel.render());
+  }
+
   markSynced(msg, silent) {
+    this.lastOperationError = "";
+    this.autoSyncPaused = false;
     this.settings.lastSyncAt = Date.now();
     this.settings.lastSyncResult = msg;
     this.saveData(this.settings);
@@ -980,7 +1037,7 @@ class SimpleGitSyncPlugin extends Plugin {
     const minutes = Math.max(1, Number(s.autoSyncMinutes) || 10);
     const self = this;
     this.timer = setInterval(function () {
-      if (self.syncing) return;
+      if (self.syncing || self.updating || self.autoSyncPaused) return;
       if (!self.isRepo()) return;
       if (!String(self.settings.remoteUrl || "").trim()) return;
       self.guard(function () { return self.doSync(true); });
@@ -988,6 +1045,153 @@ class SimpleGitSyncPlugin extends Plugin {
     if (!this.timerRegistered) {
       this.registerInterval(this.timer);
       this.timerRegistered = true;
+    }
+  }
+
+  getPluginDir() {
+    return path.join(this.getVaultPath(), this.app.vault.configDir || ".obsidian", "plugins", this.manifest.id || "simple-git-sync");
+  }
+
+  restartUpdateTimer() {
+    clearTimeout(this.updateTimer);
+    clearInterval(this.updateInterval);
+    if (!this.settings.autoUpdate || typeof requestUrl !== "function" || this.unloaded) return;
+    const check = () => this.checkForUpdates(true).catch((e) => console.error("[simple-git-sync] 更新检查失败", e.message));
+    this.updateTimer = setTimeout(check, 30000);
+    this.updateInterval = setInterval(check, 24 * 60 * 60 * 1000);
+  }
+
+  async checkForUpdates(automatic) {
+    if (this.updating || (automatic && this.syncing) || this.unloaded) return;
+    if (automatic && Date.now() - (this.settings.lastUpdateCheckAt || 0) < 24 * 60 * 60 * 1000) return;
+    this.updating = true;
+    try {
+      this.setPhase("检查插件更新…");
+      const response = await requestUrl({ url: UPDATE_API, headers: { Accept: "application/vnd.github+json" }, throw: false });
+      if (response.status === 404) {
+        if (!automatic) new Notice("还没有正式发布的插件版本。");
+        return;
+      }
+      if (response.status !== 200) throw new Error("更新服务返回 HTTP " + response.status + "，请稍后重试。");
+      const release = response.json;
+      if (release.draft || release.prerelease || !/^v?\d+\.\d+\.\d+$/.test(release.tag_name || "")) {
+        throw new Error("更新服务返回了无效的正式版本。");
+      }
+      const version = release.tag_name.replace(/^v/, "");
+      const current = this.installedUpdateVersion || this.manifest.version;
+      if (compareVersions(version, current) <= 0) {
+        if (!automatic) new Notice("当前已是最新版本 v" + current);
+      } else {
+        await this.installRelease(release, version);
+      }
+      if (!this.unloaded) {
+        this.settings.lastUpdateCheckAt = Date.now();
+        await this.saveData(this.settings);
+      }
+    } catch (e) {
+      if (!automatic) throw e;
+      console.error("[simple-git-sync] 自动更新失败", e.message);
+    } finally {
+      this.updating = false;
+      this.phase = "";
+      if (!this.unloaded) this.updateStatusIdle();
+    }
+  }
+
+  async downloadReleaseAsset(release, name) {
+    const asset = (release.assets || []).find((a) => a.name === name);
+    if (!asset) throw new Error("发布版本缺少 " + name);
+    const expected = "https://github.com/" + UPDATE_REPO + "/releases/download/" + release.tag_name + "/" + name;
+    if (asset.browser_download_url !== expected || !/^sha256:[a-f0-9]{64}$/.test(asset.digest || "")) {
+      throw new Error(name + " 的来源或校验信息无效，已停止更新。");
+    }
+    const response = await requestUrl({ url: expected, throw: false });
+    if (response.status !== 200) throw new Error("下载 " + name + " 失败（HTTP " + response.status + "）。");
+    const bytes = Buffer.from(response.arrayBuffer);
+    if (bytes.length === 0 || bytes.length > 5 * 1024 * 1024 || (asset.size && bytes.length !== asset.size)) {
+      throw new Error(name + " 文件大小异常，已停止更新。");
+    }
+    const digest = "sha256:" + createHash("sha256").update(bytes).digest("hex");
+    if (digest !== asset.digest) throw new Error(name + " 校验失败，已停止更新。");
+    return bytes;
+  }
+
+  async installRelease(release, version) {
+    this.setPhase("下载插件 v" + version + "…");
+    const files = {};
+    // 全部下载并校验成功后才接触安装目录。
+    files["main.js"] = await this.downloadReleaseAsset(release, "main.js");
+    files["manifest.json"] = await this.downloadReleaseAsset(release, "manifest.json");
+    if ((release.assets || []).some((a) => a.name === "styles.css")) {
+      files["styles.css"] = await this.downloadReleaseAsset(release, "styles.css");
+    }
+    const manifest = JSON.parse(files["manifest.json"].toString("utf8"));
+    if (manifest.id !== this.manifest.id || manifest.version !== version || release.tag_name.replace(/^v/, "") !== version) {
+      throw new Error("更新包的插件 ID 或版本不匹配。");
+    }
+    if (typeof requireApiVersion === "function" && !requireApiVersion(manifest.minAppVersion || "1.0.0")) {
+      throw new Error("此版本需要 Obsidian " + manifest.minAppVersion + " 或更新版本。");
+    }
+    new Script(files["main.js"].toString("utf8"), { filename: "main.js" });
+
+    const dir = this.getPluginDir();
+    const backupDir = path.join(dir, ".update-backup");
+    const old = {};
+    const names = ["main.js", "styles.css", "manifest.json"];
+    for (const name of names) {
+      const file = path.join(dir, name);
+      old[name] = fs.existsSync(file) ? fs.readFileSync(file) : null;
+    }
+    fs.mkdirSync(backupDir, { recursive: true });
+    for (const name of names) {
+      const target = path.join(backupDir, name);
+      if (old[name]) fs.writeFileSync(target, old[name]);
+      else if (fs.existsSync(target)) fs.unlinkSync(target);
+    }
+    const restore = () => {
+      for (const name of names) {
+        const file = path.join(dir, name);
+        if (old[name]) fs.writeFileSync(file, old[name]);
+        else if (fs.existsSync(file)) fs.unlinkSync(file);
+      }
+    };
+    try {
+      for (const name of Object.keys(files)) fs.writeFileSync(path.join(dir, ".update-" + name + ".tmp"), files[name]);
+      // manifest 最后替换；若进程中断，下次检查仍会发现待更新版本。
+      for (const name of names) {
+        if (files[name]) fs.renameSync(path.join(dir, ".update-" + name + ".tmp"), path.join(dir, name));
+        else if (name === "styles.css" && fs.existsSync(path.join(dir, name))) fs.unlinkSync(path.join(dir, name));
+      }
+      await this.saveData(this.settings);
+      this.installedUpdateVersion = version;
+      await this.reloadUpdatedPlugin(restore);
+      new Notice("插件已更新到 v" + version + (this.unloaded ? "。" : "，重启 Obsidian 后生效。"), 8000);
+    } catch (e) {
+      restore();
+      this.installedUpdateVersion = undefined;
+      throw new Error("插件更新失败，已恢复上一版：" + e.message);
+    } finally {
+      for (const name of names) {
+        const tmp = path.join(dir, ".update-" + name + ".tmp");
+        if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+      }
+    }
+  }
+
+  async reloadUpdatedPlugin(restore) {
+    const plugins = this.app.plugins;
+    const id = this.manifest.id;
+    if (!plugins || typeof plugins.disablePlugin !== "function" || typeof plugins.enablePlugin !== "function") return;
+    await plugins.disablePlugin(id);
+    try {
+      await plugins.enablePlugin(id);
+      if (plugins.plugins && (!plugins.plugins[id] || plugins.plugins[id].manifest.version !== this.installedUpdateVersion)) {
+        throw new Error("新版插件未能加载");
+      }
+    } catch (e) {
+      restore();
+      await plugins.enablePlugin(id);
+      throw e;
     }
   }
 
@@ -1095,7 +1299,7 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
 
     const selFolders = Array.isArray(this.plugin.settings.selectedFolders) ? this.plugin.settings.selectedFolders : [];
     new Setting(c)
-      .setName("要同步的文件夹")
+      .setName("提交范围（可选）")
       .setDesc(
         selFolders.length === 0
           ? "未选择：同步时处理整个仓库。点「选择」挑要同步的文件夹。"
@@ -1117,7 +1321,7 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
       }.bind(this));
 
     new Setting(c)
-      .setName("同步范围")
+      .setName("手动指定提交路径（可选）")
       .setDesc("每行一个目录，限制提交和推送的本地改动；拉取仍更新整个仓库。留空 = 当前 vault 的全部文件")
       .addTextArea(function (t) {
         t.inputEl.rows = 4;
@@ -1127,9 +1331,26 @@ class SimpleGitSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.syncPaths)
           .onChange(async function (v) {
             this.plugin.settings.syncPaths = v;
+            this.plugin.settings.selectedFolders = [];
             await this.plugin.saveSettings();
           }.bind(this));
       }.bind(this));
+
+    c.createEl("h3", { text: "插件更新" });
+    new Setting(c)
+      .setName("自动更新插件")
+      .setDesc("每天检查 GitHub 正式 Release，校验文件后安装并重载；保留上一版备份")
+      .addToggle((t) => t.setValue(this.plugin.settings.autoUpdate).onChange(async (v) => {
+        this.plugin.settings.autoUpdate = v;
+        await this.plugin.saveSettings();
+      }));
+    new Setting(c)
+      .setName("当前版本 v" + this.plugin.manifest.version)
+      .setDesc("更新来源：github.com/BertQLi/GitObsidian")
+      .addButton((b) => b.setButtonText("检查更新").onClick(async () => {
+        await this.plugin.guard(() => this.plugin.checkForUpdates(false));
+        this.display();
+      }));
 
     new Setting(c)
       .setName("自动同步")

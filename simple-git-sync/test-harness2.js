@@ -83,6 +83,10 @@ async function main() {
     try { await p.doSync(false); } catch (e) { msg = e.message; }
     t("冲突时给出中文提示", /冲突/.test(msg), msg.slice(0, 160));
 
+    let repeatedBlocked = false;
+    try { await p.doSync(false); } catch (e) { repeatedBlocked = /未解决的合并冲突/.test(e.message); }
+    t("冲突后暂停自动同步且拒绝再次自动提交", repeatedBlocked && p.autoSyncPaused === true);
+
     // abort 能恢复
     await p.doAbortMerge();
     const status = git(["status", "--porcelain"], vault).trim();

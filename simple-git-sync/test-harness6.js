@@ -124,14 +124,14 @@ async function main() {
 
   // --- 按钮齐全 ---
   const buttons = collectButtons(modal.contentEl);
-  t("有「同步选中」按钮", buttons.includes("同步选中"), JSON.stringify(buttons));
-  t("有「全部同步」按钮", buttons.includes("全部同步"), JSON.stringify(buttons));
-  t("有「上传」按钮", buttons.includes("上传"), JSON.stringify(buttons));
-  t("有「下载」按钮", buttons.includes("下载"), JSON.stringify(buttons));
-  t("有「选择要同步的文件夹」按钮", buttons.includes("选择要同步的文件夹"), JSON.stringify(buttons));
-  t("有「安装到 .obsidian」按钮", buttons.includes("安装到 .obsidian"), JSON.stringify(buttons));
+  t("有「立即同步」按钮", buttons.includes("立即同步"), JSON.stringify(buttons));
+  t("有「同步整个 vault」按钮", buttons.includes("同步整个 vault"), JSON.stringify(buttons));
+  t("有「上传」按钮", buttons.includes("仅上传"), JSON.stringify(buttons));
+  t("有「下载」按钮", buttons.includes("仅下载"), JSON.stringify(buttons));
+  t("有「提交范围…」按钮", buttons.includes("提交范围…"), JSON.stringify(buttons));
+  t("有「从本地源码安装」按钮", buttons.includes("从本地源码安装"), JSON.stringify(buttons));
   t("有「取消未完成的合并」按钮", buttons.includes("取消未完成的合并"), JSON.stringify(buttons));
-  t("有「刷新」按钮", buttons.includes("刷新"), JSON.stringify(buttons));
+  t("有「刷新」按钮", buttons.includes("刷新状态"), JSON.stringify(buttons));
 
   // --- 状态摘要显示 ---
   const texts = collectTexts(modal.contentEl);
@@ -139,9 +139,9 @@ async function main() {
   t("显示同步范围", joined.includes("SIGMOD2027"), joined.slice(0, 200));
   t("显示仓库状态", joined.includes("已初始化"), joined.slice(0, 200));
 
-  // --- 点击「选择要同步的文件夹」会弹选择器 ---
+  // --- 点击「提交范围…」会弹选择器 ---
   MODALS.length = 0;
-  const chooseBtn = findButton(modal.contentEl, "选择要同步的文件夹");
+  const chooseBtn = findButton(modal.contentEl, "提交范围…");
   t("找到选择文件夹按钮", !!chooseBtn, "");
   if (chooseBtn) {
     await chooseBtn._on.click();
@@ -153,7 +153,7 @@ async function main() {
   MODALS.length = 0;
   p.showStatus();
   const m2 = MODALS[0];
-  const uploadBtn = findButton(m2.contentEl, "上传");
+  const uploadBtn = findButton(m2.contentEl, "仅上传");
   t("找到上传按钮", !!uploadBtn, "");
   if (uploadBtn) {
     await uploadBtn._on.click();
@@ -161,21 +161,43 @@ async function main() {
     t("点击上传后文件推到远程", remoteTree.some((f) => f.includes("SIGMOD2027/new.md")), JSON.stringify(remoteTree));
   }
 
-  // 「全部同步」必须覆盖选中文件夹设置，提交本 vault 里的其他文件夹。
-  fs.writeFileSync(path.join(vault, "笔记A", "note.md"), "# 全部同步测试\n");
+  // 「同步整个 vault」必须覆盖选中文件夹设置，提交本 vault 里的其他文件夹。
+  fs.writeFileSync(path.join(vault, "笔记A", "note.md"), "# 同步整个 vault测试\n");
   MODALS.length = 0;
   p.showStatus();
-  const allBtn = findButton(MODALS[0].contentEl, "全部同步");
+  const allBtn = findButton(MODALS[0].contentEl, "同步整个 vault");
   if (allBtn) await allBtn._on.click();
   const remoteNote = git(["--git-dir=" + remote, "show", "main:笔记A/note.md"], tmp);
-  t("全部同步会提交未选中的文件夹", remoteNote.includes("全部同步测试"), remoteNote);
+  t("同步整个 vault会提交未选中的文件夹", remoteNote.includes("同步整个 vault测试"), remoteNote);
 
   // --- 面板刷新后状态更新 ---
   MODALS.length = 0;
   p.showStatus();
   const m3 = MODALS[0];
   const texts3 = collectTexts(m3.contentEl).join(" | ");
-  t("刷新后显示上次同步结果", texts3.includes("已同步") || texts3.includes("上传"), texts3.slice(0, 300));
+  t("刷新后显示上次同步结果", texts3.includes("已同步") || texts3.includes("仅上传"), texts3.slice(0, 300));
+
+  // 主按钮只执行配置范围；重复点击不会启动第二个同步。
+  fs.writeFileSync(path.join(vault, "笔记A", "note.md"), "# outside selected scope\n");
+  fs.writeFileSync(path.join(vault, "SIGMOD2027", "note.md"), "# selected scope\n");
+  MODALS.length = 0;
+  p.showStatus();
+  const syncBtn = findButton(MODALS[0].contentEl, "立即同步");
+  await syncBtn._on.click();
+  const scopedHead = git(["show", "--name-only", "--pretty=format:", "HEAD"]).trim().split("\n");
+  t("立即同步使用配置的提交范围", scopedHead.every((f) => f.startsWith("SIGMOD2027/")), JSON.stringify(scopedHead));
+  const realSync = p.doSync;
+  let calls = 0, release;
+  p.doSync = async () => { calls++; await new Promise((resolve) => { release = resolve; }); };
+  MODALS.length = 0;
+  p.showStatus();
+  const duplicateBtn = findButton(MODALS[0].contentEl, "立即同步");
+  const pendingClick = duplicateBtn._on.click();
+  await duplicateBtn._on.click();
+  t("同步期间重复点击不会重复执行", calls === 1);
+  release();
+  await pendingClick;
+  p.doSync = realSync;
 
   // --- 未初始化仓库时不应显示「取消合并」 ---
   const emptyVault = path.join(tmp, "empty");
@@ -186,8 +208,8 @@ async function main() {
   p2.showStatus();
   const btns2 = collectButtons(MODALS[0].contentEl);
   t("未初始化时隐藏取消合并", !btns2.includes("取消未完成的合并"), JSON.stringify(btns2));
-  t("未初始化时仍显示同步按钮", btns2.includes("同步选中"), JSON.stringify(btns2));
-  t("未初始化时可从面板首次上传", btns2.includes("初始化并首次上传"), JSON.stringify(btns2));
+  t("未初始化时仍显示同步按钮", btns2.includes("初始化并首次同步"), JSON.stringify(btns2));
+  t("未初始化时可从面板首次上传", btns2.includes("初始化并首次同步"), JSON.stringify(btns2));
 
   console.log(results.join("\n"));
   const failed = results.filter((r) => r.startsWith("FAIL")).length;
