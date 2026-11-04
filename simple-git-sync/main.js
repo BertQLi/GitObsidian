@@ -118,46 +118,31 @@ class ControlPanelModal extends Modal {
 
     el.createEl("h3", { text: "Git 同步" });
 
-    // ---------- 状态摘要 ----------
+    // 常用状态压成一行；完整仓库信息和同步记录放在“详细信息”。
     const info = el.createDiv();
     info.style.fontSize = "12px";
+    info.style.color = "var(--text-muted)";
     info.style.lineHeight = "1.7";
     info.style.marginBottom = "12px";
-    info.style.padding = "8px 10px";
-    info.style.background = "var(--background-secondary)";
-    info.style.borderRadius = "6px";
-
-    let scopeText = "整个 vault";
-    try {
-      const sel = p.selectedPathSpec();
-      if (Array.isArray(p.settings.selectedFolders) && p.settings.selectedFolders.length) {
-        scopeText = sel.length ? sel.join("、") : "所选文件夹不存在";
-      } else if (String(p.settings.syncPaths || "").trim()) {
-        const paths = p.pathSpec();
-        scopeText = paths.length ? paths.join("、") : "配置的范围不存在";
-      }
-    } catch (e) {
-      scopeText = "范围配置无效";
+    let state = "就绪";
+    if (!p.isRepo()) state = p._repoRoot ? "仓库待调整" : "未初始化";
+    else if (p.lastOperationError) state = "需要处理";
+    else if (p.autoSyncPaused) state = "同步已暂停";
+    else {
+      const result = String(p.settings.lastSyncResult || "").match(/^(已同步|已上传|已下载)/);
+      if (result) state = result[1];
     }
-    const lastText = p.settings.lastSyncAt
-      ? new Date(p.settings.lastSyncAt).toLocaleString("zh-CN")
-      : "从未";
-
-    const row = (label, value, color) => {
-      const d = info.createDiv();
-      const l = d.createEl("span", { text: label + "：" });
-      l.style.opacity = "0.65";
-      const v = d.createEl("span", { text: value });
-      if (color) v.style.color = color;
-    };
-    const repoText = p.isRepo() ? "已初始化（当前 vault 是独立仓库）" :
-      (p._repoRoot ? "位于父仓库内，请拆分仓库" : "未初始化");
-    row("仓库", repoText, p.isRepo() ? "" : "var(--text-error)");
-    row("提交范围", scopeText);
-    row("上次成功", lastText);
-    if (p.lastOperationError) row("需要处理", p.lastOperationError, "var(--text-error)");
-    if (p.autoSyncPaused) row("自动同步", "已暂停，请先处理合并冲突");
-    if (p.settings.lastSyncResult) row("结果", p.settings.lastSyncResult);
+    const lastTime = p.settings.lastSyncAt ? new Date(p.settings.lastSyncAt).toLocaleString("zh-CN", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+    }) : "";
+    info.setText([state, this.scopeText(), lastTime].filter(Boolean).join(" · "));
+    const warning = p.lastOperationError || (p.autoSyncPaused ? "自动同步已暂停，请先处理合并冲突。" :
+      (!p.isRepo() && p._repoRoot ? "位于父仓库内，请拆分仓库后同步。" : ""));
+    if (warning) {
+      const message = el.createEl("p", { text: warning });
+      message.style.fontSize = "12px";
+      message.style.color = "var(--text-error)";
+    }
 
     const busy = p.syncing || p.updating;
     const mkBtn = (parent, label, cta, onClick, tooltip) => {
@@ -182,13 +167,10 @@ class ControlPanelModal extends Modal {
     const primary = el.createDiv();
     const label = busy ? (p.phase || "处理中…") : (p.isRepo() ? "立即同步" : "初始化并首次同步");
     mkBtn(primary, label, true, () => run(() => p.isRepo() ? p.doSync(false) : p.doInit()),
-      "保存本地改动 → 合并远程改动 → 上传，自动同步也使用同一提交范围");
-    const hint = el.createEl("p", { text: "保存本地改动 → 合并远程改动 → 上传" });
-    hint.style.fontSize = "12px";
-    hint.style.opacity = "0.7";
+      "同步当前提交范围");
 
     const options = el.createDiv();
-    mkBtn(options, "提交范围…", false, async () => p.doChooseFolders(() => this.render()));
+    mkBtn(options, "提交范围", false, async () => p.doChooseFolders(() => this.render()));
     mkBtn(options, "检查更新", false, () => run(() => p.checkForUpdates(false)));
     options.createEl("small", { text: "v" + p.manifest.version });
 
@@ -227,10 +209,31 @@ class ControlPanelModal extends Modal {
     }
   }
 
+  scopeText() {
+    const p = this.plugin;
+    try {
+      const sel = p.selectedPathSpec();
+      if (Array.isArray(p.settings.selectedFolders) && p.settings.selectedFolders.length) {
+        return sel.length ? sel.join("、") : "所选文件夹不存在";
+      }
+      if (String(p.settings.syncPaths || "").trim()) {
+        const paths = p.pathSpec();
+        return paths.length ? paths.join("、") : "配置的范围不存在";
+      }
+      return "整个 vault";
+    } catch (e) {
+      return "范围配置无效";
+    }
+  }
+
   buildDetailText() {
     const p = this.plugin;
     const lines = [];
+    lines.push("仓库状态: " + (p.isRepo() ? "已初始化（当前 vault 是独立仓库）" : "未初始化"));
     lines.push("仓库目录: " + p.getVaultPath());
+    lines.push("提交范围: " + this.scopeText());
+    lines.push("上次成功: " + (p.settings.lastSyncAt ? new Date(p.settings.lastSyncAt).toLocaleString("zh-CN") : "从未"));
+    lines.push("上次结果: " + (p.settings.lastSyncResult || "无"));
     lines.push("远程地址: " + (p.settings.remoteUrl || "(未填写)"));
     lines.push("分支: " + (p.settings.branch || "main"));
     lines.push("自动同步: " + (p.settings.autoSync ? p.settings.autoSyncMinutes + " 分钟" : "关"));

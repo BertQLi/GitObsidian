@@ -128,7 +128,7 @@ async function main() {
   t("有「同步整个 vault」按钮", buttons.includes("同步整个 vault"), JSON.stringify(buttons));
   t("有「上传」按钮", buttons.includes("仅上传"), JSON.stringify(buttons));
   t("有「下载」按钮", buttons.includes("仅下载"), JSON.stringify(buttons));
-  t("有「提交范围…」按钮", buttons.includes("提交范围…"), JSON.stringify(buttons));
+  t("有「提交范围」按钮", buttons.includes("提交范围"), JSON.stringify(buttons));
   t("有「从本地源码安装」按钮", buttons.includes("从本地源码安装"), JSON.stringify(buttons));
   t("有「取消未完成的合并」按钮", buttons.includes("取消未完成的合并"), JSON.stringify(buttons));
   t("有「刷新」按钮", buttons.includes("刷新状态"), JSON.stringify(buttons));
@@ -137,11 +137,11 @@ async function main() {
   const texts = collectTexts(modal.contentEl);
   const joined = texts.join(" | ");
   t("显示同步范围", joined.includes("SIGMOD2027"), joined.slice(0, 200));
-  t("显示仓库状态", joined.includes("已初始化"), joined.slice(0, 200));
+  t("显示简短就绪状态", joined.includes("就绪"), joined.slice(0, 200));
 
-  // --- 点击「提交范围…」会弹选择器 ---
+  // --- 点击「提交范围」会弹选择器 ---
   MODALS.length = 0;
-  const chooseBtn = findButton(modal.contentEl, "提交范围…");
+  const chooseBtn = findButton(modal.contentEl, "提交范围");
   t("找到选择文件夹按钮", !!chooseBtn, "");
   if (chooseBtn) {
     await chooseBtn._on.click();
