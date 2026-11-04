@@ -1067,7 +1067,7 @@ class SimpleGitSyncPlugin extends Plugin {
     this.updating = true;
     try {
       this.setPhase("检查插件更新…");
-      const response = await requestUrl({ url: UPDATE_API, headers: { Accept: "application/vnd.github+json" }, throw: false });
+      const response = await requestUrl({ url: UPDATE_API + "?check=" + Date.now(), headers: { "Cache-Control": "no-cache" }, throw: false });
       if (response.status === 404) {
         if (!automatic) new Notice("还没有正式发布的插件版本。");
         return;

@@ -40,7 +40,7 @@ function release(version, overrides = {}) {
 function serve(pkg, calls = []) {
   responder = (req) => {
     calls.push(req);
-    if (req.url.endsWith('/latest/download/update.json')) return { status: 200, json: pkg.data };
+    if (new URL(req.url).pathname.endsWith('/latest/download/update.json')) return { status: 200, json: pkg.data };
     const name = req.url.split('/').pop();
     const b = pkg.bytes[name];
     return { status: b ? 200 : 404, arrayBuffer: b };
