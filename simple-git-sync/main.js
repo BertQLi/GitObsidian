@@ -7,7 +7,7 @@ const path = require("path");
 const { createHash } = require("crypto");
 const { Script } = require("vm");
 const UPDATE_REPO = "BertQLi/GitObsidian";
-const UPDATE_API = "https://api.github.com/repos/" + UPDATE_REPO + "/releases/latest";
+const UPDATE_API = "https://github.com/" + UPDATE_REPO + "/releases/latest/download/update.json";
 
 const GITIGNORE = [
   "# 每台设备自己的界面布局，同步会冲突",

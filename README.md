@@ -36,7 +36,7 @@
 
 默认开启：启动 30 秒后检查，成功检查间隔至少 24 小时。只安装 `BertQLi/GitObsidian` 正式 Release，不从开发中的 `main` 分支取代码。
 
-更新前校验 GitHub 提供的 SHA-256、文件大小、插件 ID、版本、最低 Obsidian 版本和 JavaScript 语法；全部验证完成后才替换文件。`data.json` 保留，上一版代码备份在插件目录的 `.update-backup/`。安装或重载失败时恢复上一版；不支持即时重载的宿主提示重启。
+更新前校验 发布包的 SHA-256、文件大小、插件 ID、版本、最低 Obsidian 版本和 JavaScript 语法；全部验证完成后才替换文件。`data.json` 保留，上一版代码备份在插件目录的 `.update-backup/`。安装或重载失败时恢复上一版；不支持即时重载的宿主提示重启。
 
 设置中可关闭自动更新。更新检查不发送笔记仓库 PAT。
 

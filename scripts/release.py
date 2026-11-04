@@ -57,8 +57,13 @@ def main():
         raise SystemExit('Release tag points at a different commit')
     upload = release['upload_url'].split('{')[0]
     existing = {a['name']:a for a in release.get('assets',[])}
-    for name in ['main.js','manifest.json']:
-        content = (ROOT/'simple-git-sync'/name).read_bytes()
+    payloads = {name:(ROOT/'simple-git-sync'/name).read_bytes() for name in ['main.js','manifest.json']}
+    metadata = {'tag_name':tag, 'assets':[
+        {'name':name,'size':len(content),'digest':'sha256:'+hashlib.sha256(content).hexdigest(),
+         'browser_download_url':'https://github.com/'+REPO+'/releases/download/'+tag+'/'+name}
+        for name,content in payloads.items()]}
+    payloads['update.json'] = json.dumps(metadata,ensure_ascii=False,indent=2).encode()
+    for name,content in payloads.items():
         digest = 'sha256:'+hashlib.sha256(content).hexdigest()
         if name in existing:
             if existing[name].get('digest') != digest:
