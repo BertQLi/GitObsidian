@@ -1094,7 +1094,10 @@ class SimpleGitSyncPlugin extends Plugin {
     } finally {
       this.updating = false;
       this.phase = "";
-      if (!this.unloaded) this.updateStatusIdle();
+      if (!this.unloaded) {
+        this.updateStatusIdle();
+        if (this.panels) this.panels.forEach((panel) => panel.render());
+      }
     }
   }
 

@@ -126,6 +126,12 @@ const intact = (f) => fs.readFileSync(path.join(f.dir,'main.js'),'utf8') === f.o
     const f=await fixture(); f.p.syncing=true; let called=false; responder=()=>{called=true;throw Error('should not call');};
     await f.p.checkForUpdates(true); assert(!called);
   });
+  await test('后台检查完成后面板恢复可操作状态', async () => {
+    const f=await fixture('0.10.0'); serve(release('0.10.0')); const rendered=[];
+    f.p.panels.add({render:()=>rendered.push(f.p.updating)});
+    await f.p.checkForUpdates(true);
+    assert.equal(rendered[0],true); assert.equal(rendered[rendered.length-1],false);
+  });
   console.log(results.join('\n'));
   const failed=results.filter((r)=>r.startsWith('FAIL')).length;
   console.log('\n=== '+(results.length-failed)+'/'+results.length+' passed ===');

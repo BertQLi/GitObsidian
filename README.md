@@ -69,9 +69,9 @@ node simple-git-sync/test-harness.js <临时目录>
 | test-harness6.js | 23 | 主按钮、高级操作、重复点击 |
 | test-harness7.js | 12 | 独立仓库、新设备克隆接入 |
 | test-harness8.js | 23 | 本地排除与令牌保护 |
-| test-harness9.js | 13 | 更新校验、回滚、重载和设置保留 |
+| test-harness9.js | 14 | 更新校验、回滚、重载和设置保留 |
 
-共 152 个断言。Git 测试使用本地 bare 仓库；更新测试模拟 HTTP 响应并操作真实临时文件。
+共 153 个断言。Git 测试使用本地 bare 仓库；更新测试模拟 HTTP 响应并操作真实临时文件。
 
 ## 边界
 
