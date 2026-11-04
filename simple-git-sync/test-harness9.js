@@ -132,6 +132,14 @@ const intact = (f) => fs.readFileSync(path.join(f.dir,'main.js'),'utf8') === f.o
     await f.p.checkForUpdates(true);
     assert.equal(rendered[0],true); assert.equal(rendered[rendered.length-1],false);
   });
+  await test('重载时刷新宿主版本缓存', async () => {
+    const f=await fixture(); serve(release('0.10.0'));
+    const manager={manifests:{'simple-git-sync':{...f.p.manifest,dir:'.obsidian/plugins/simple-git-sync'}},plugins:{},
+      disablePlugin:async()=>f.p.onunload(),enablePlugin:async(id)=>{manager.plugins[id]={manifest:manager.manifests[id]};}};
+    f.p.app.plugins=manager; await f.p.checkForUpdates(false);
+    assert.equal(manager.plugins['simple-git-sync'].manifest.version,'0.10.0');
+    assert.equal(manager.manifests['simple-git-sync'].dir,'.obsidian/plugins/simple-git-sync');
+  });
   console.log(results.join('\n'));
   const failed=results.filter((r)=>r.startsWith('FAIL')).length;
   console.log('\n=== '+(results.length-failed)+'/'+results.length+' passed ===');

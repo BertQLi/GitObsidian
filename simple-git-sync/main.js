@@ -1185,18 +1185,24 @@ class SimpleGitSyncPlugin extends Plugin {
     const plugins = this.app.plugins;
     const id = this.manifest.id;
     if (!plugins || typeof plugins.disablePlugin !== "function" || typeof plugins.enablePlugin !== "function") return;
+    const previousManifest = plugins.manifests && plugins.manifests[id];
+    const nextManifest = JSON.parse(fs.readFileSync(path.join(this.getPluginDir(), "manifest.json"), "utf8"));
     await plugins.disablePlugin(id);
     try {
+      // enablePlugin 使用宿主缓存的 manifest，而不是重新读取磁盘。
+      if (plugins.manifests) plugins.manifests[id] = Object.assign({}, previousManifest || this.manifest, nextManifest);
       await plugins.enablePlugin(id);
       if (plugins.plugins && (!plugins.plugins[id] || plugins.plugins[id].manifest.version !== this.installedUpdateVersion)) {
         throw new Error("新版插件未能加载");
       }
     } catch (e) {
       restore();
+      if (plugins.manifests) plugins.manifests[id] = previousManifest || this.manifest;
       await plugins.enablePlugin(id);
       throw e;
     }
   }
+
 
   showStatus() {
     new ControlPanelModal(this.app, this).open();
