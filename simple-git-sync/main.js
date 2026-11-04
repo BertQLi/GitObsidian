@@ -417,6 +417,7 @@ class SimpleGitSyncPlugin extends Plugin {
 
   onunload() {
     this.unloaded = true;
+    if (this.panels) Array.from(this.panels).forEach((panel) => panel.close());
     clearTimeout(this.updateTimer);
     clearInterval(this.updateInterval);
     if (this.timer) {

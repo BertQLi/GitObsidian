@@ -1,7 +1,7 @@
 {
   "id": "simple-git-sync",
   "name": "Simple Git Sync",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "minAppVersion": "1.0.0",
   "description": "个人 vault 的 Git 同步与插件自动更新：一键同步、清晰进度和正式版本校验。",
   "author": "libaoqiang",

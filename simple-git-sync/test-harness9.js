@@ -114,9 +114,10 @@ const intact = (f) => fs.readFileSync(path.join(f.dir,'main.js'),'utf8') === f.o
     await assert.rejects(f.p.checkForUpdates(false),/恢复上一版/); assert.equal(enabled,2); assert(intact(f));
   });
   await test('成功重载后保留用户设置', async () => {
-    const f=await fixture(); serve(release('0.10.0')); let enabled=0;
+    const f=await fixture(); serve(release('0.10.0')); let enabled=0, closed=false;
+    f.p.panels.add({render(){},close(){closed=true;}});
     f.p.app.plugins={disablePlugin:async()=>f.p.onunload(),enablePlugin:async()=>enabled++};
-    await f.p.checkForUpdates(false); assert.equal(enabled,1);
+    await f.p.checkForUpdates(false); assert.equal(enabled,1); assert(closed);
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'data.json'))).token,'keep-me');
   });
   await test('没有 Release 时友好返回', async () => {
